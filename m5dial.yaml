@@ -94,13 +94,19 @@ display:
     reset_pin: GPIO8
     dc_pin: GPIO4
     invert_colors: true
+    lambda: |-
+      auto now = id(esptime).now();
+      if (now.is_valid()) {
+        it.strftime(120, 120, id(roboto24), TextAlign::CENTER, "%H:%M", now);
+      } else {
+        it.print(120, 120, id(roboto24), TextAlign::CENTER, "--:--");
+      }
 
 touchscreen:
   - platform: ft5x06
     id: touch
     i2c_id: internal_i2c
     address: 0x38
-    # interrupt_pin: GPIO14  # not supported by this component
 
 light:
   - platform: monochromatic
@@ -108,3 +114,8 @@ light:
     output: backlight_output
     id: display_backlight
     default_transition_length: 0s
+
+font:
+  - file: "gfonts://Roboto"
+    id: roboto24
+    size: 24
