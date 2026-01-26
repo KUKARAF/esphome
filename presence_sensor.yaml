@@ -1,0 +1,59 @@
+substitutions:
+  device_name: "ESP32 Presence Sensor"
+  friendly_name: "ESP32 Presence Sensor"
+
+esphome:
+  name: esp32-presence-sensor
+  friendly_name: "${friendly_name}"
+
+esp32:
+  board: nodemcu-32s
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+logger:
+
+# Presence sensor using PIR on pin D13 (GPIO13)
+binary_sensor:
+  - platform: gpio
+    pin: GPIO13
+    name: "${device_name} Presence"
+    device_class: motion
+    filters:
+      - delayed_off: 30s  # Keep the presence detected for 30 seconds after last motion
+    on_press:
+      then:
+        - logger.log: "Motion detected"
+    on_release:
+      then:
+        - logger.log: "No motion detected"
+
+# Optional: Add a status LED
+status_led:
+  pin:
+    number: GPIO2  # Built-in LED on most ESP32 boards
+    inverted: true
+
+# Optional: Add time synchronization with Home Assistant
+time:
+  - platform: homeassistant
+    id: homeassistant_time
