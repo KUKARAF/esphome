@@ -42,12 +42,7 @@ font:
     size: 8
     glyphs: "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~ °"
 
-# Time from Home Assistant
-time:
-  - platform: homeassistant
-    id: hass_time
-
-# Text sensor to display custom messages from HA
+# Text sensor to read the text to show from Home Assistant
 text_sensor:
   - platform: homeassistant
     name: "Display Text"
@@ -75,10 +70,4 @@ display:
     intensity: 1
     id: led_matrix
     lambda: |-
-      // Check if custom text is available
-      if (id(display_text).has_state() && id(display_text).state.length() > 0) {
-        it.printf(0, 0, id(matrix_font), "%s", id(display_text).state.c_str());
-      } else {
-        // Default: show time with seconds
-        it.strftime(0, 0, id(matrix_font), "%H:%M:%S", id(hass_time).now());
-      }
+      it.printf(0, 0, id(matrix_font), "%s", id(display_text).has_state() ? id(display_text).state.c_str() : "hi there :)");
