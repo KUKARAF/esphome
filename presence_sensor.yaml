@@ -39,13 +39,24 @@ binary_sensor:
     name: "${device_name} Presence"
     device_class: motion
     filters:
-      - delayed_off: 30s  # Keep the presence detected for 30 seconds after last motion
+      - delayed_off: 5s  # Keep the presence detected for 30 seconds after last motion
     on_press:
       then:
         - logger.log: "Motion detected"
     on_release:
       then:
         - logger.log: "No motion detected"
+
+  - platform: gpio
+    pin:
+      number: GPIO12
+      mode:
+        input: true
+        pullup: true
+    name: "${device_name} Switch"
+    filters:
+      - delayed_on: 1ms
+      - delayed_off: 1ms
 
 # Optional: Add a status LED
 status_led:
