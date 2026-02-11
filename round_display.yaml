@@ -1,0 +1,281 @@
+substitutions:
+  devicename: round-display
+  friendname: Round Display
+  mediaplayer: media_player.owntone_server # Replace with a suitable media player entity you want to control
+  weather: sensor.weather # Replace with a suitable weather entity from your home assistant
+  screensaver: 5 min # Timeout for how long the screen should stay on after the last interaction
+  sdapin: GPIO4
+  sclpin: GPIO5
+  tint: GPIO0
+  tres: GPIO1
+  dcpin: GPIO2
+  bkpin: GPIO3
+  clpin: GPIO6
+  mopin: GPIO7
+  cspin: GPIO10
+
+esphome:
+  name: $devicename
+  friendly_name: $friendname
+  on_boot: 
+    - priority: -100
+      then:
+        - script.execute: screentime
+        - lvgl.label.update:
+              id: date_widget
+              text: 
+                time_format: "%A %b %d"
+                time: esptime
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: arduino
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password # Make sure you have defined a value for this in your secrets
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+
+font:
+  - file: "gfonts://Roboto"
+    id: roboto
+    size: 18
+    glyphsets:
+      - GF_Latin_Kernel
+
+time:
+  - platform: sntp
+    timezone: "America/Toronto"
+    id: esptime
+    on_time:
+      - cron: '* * * * * *'
+        then:
+          - lvgl.label.update:
+              id: time_widget
+              text: 
+                time_format: "%H:%m:%S"
+                time: esptime
+      - hours: 0
+        then:
+          - lvgl.label.update:
+              id: date_widget
+              text: 
+                time_format: "%A %b %d"
+                time: esptime
+
+text_sensor:
+  - platform: homeassistant
+    id: music_state
+    entity_id: $mediaplayer
+  - platform: homeassistant
+    id: track_name
+    entity_id: $mediaplayer
+    attribute: media_title
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: track_name_widget
+            text: !lambda return id(track_name).state;
+  - platform: homeassistant
+    id: track_artist
+    entity_id: $mediaplayer
+    attribute: media_artist
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: track_artist_widget
+            text: !lambda return id(track_artist).state;
+  - platform: homeassistant
+    id: track_album
+    entity_id: $mediaplayer
+    attribute: media_album_name
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: track_album_widget
+            text: !lambda return id(track_album).state;
+
+sensor:
+  - platform: homeassistant
+    id: outdoor_temperature
+    entity_id: $weather
+    on_value: 
+      then:
+        - lvgl.label.update:
+            id: temp_widget
+            text: 
+              format: "%.1f°"
+              args: [ 'id(outdoor_temperature).get_state()' ]
+  - platform: homeassistant
+    id: media_player_volume
+    entity_id: $mediaplayer
+    attribute: volume_level
+    on_value:
+      - lvgl.arc.update:
+          id: volume_control_widget
+          value: !lambda return (x * 100);
+
+binary_sensor:
+  - platform: template
+    id: is_playing
+    lambda: 'return id(music_state).state == "playing";'
+    filters:
+      - delayed_off: 1300ms
+    on_press:
+      then:
+        - lvgl.page.show: media_player_page
+    on_release:
+      then:
+        - lvgl.page.show: time_page
+
+script:
+  - id: screentime
+    mode: restart
+    then:
+      - light.turn_on: back_light
+      - delay: $screensaver
+      - light.turn_off: back_light
+  - id: screenoff
+    then:
+      - script.stop: screentime
+      - light.turn_off: back_light
+
+output:
+  - platform: ledc
+    pin: $bkpin
+    id: gpio_3_backlight_pwm
+
+light:
+  - platform: monochromatic
+    output: gpio_3_backlight_pwm
+    name: "Display Backlight"
+    id: back_light
+    restore_mode: ALWAYS_OFF
+    on_turn_off: 
+      then:
+        - lvgl.pause:
+            show_snow: true
+    on_turn_on: 
+      then:
+        - lvgl.resume:
+
+spi:
+  mosi_pin: $mopin
+  clk_pin: $clpin
+
+i2c:
+  sda: $sdapin
+  scl: $sclpin
+  scan: true
+  id: ic_bus
+
+display:
+  - platform: ili9xxx
+    model: GC9A01A
+    id: watchface
+    reset_pin: $tres
+    cs_pin: $cspin
+    dc_pin: 
+      number: $dcpin
+      ignore_strapping_warning: true
+    invert_colors: false
+
+touchscreen:
+  - platform: cst816
+    id: touch
+    interrupt_pin: $tint
+    on_update:
+      - script.execute: screentime
+      - lambda: |-
+            for (auto touch: touches)  {
+                if (touch.state <= 2) {
+                  ESP_LOGI("Touch points:", "id=%d x=%d, y=%d", touch.id, touch.x, touch.y);
+                }
+            }
+
+lvgl:
+  buffer_size: 25%
+  top_layer:
+    widgets:
+      - label:
+          id: time_widget
+          align: CENTER
+          y: 95
+          text: 
+            time_format: "%H:%m:%S"
+            time: esptime
+          on_short_click:
+            then:
+              - script.execute: screenoff
+      - label:
+          id: date_widget
+          align: CENTER
+          y: 80
+          text: 
+            time_format: "%A %b %d"
+            time: esptime
+          on_short_click:
+            then:
+              - script.execute: screenoff
+  pages:
+    - id: time_page
+      widgets:
+        - label:
+            align: CENTER
+            id: temp_widget
+            y: -100
+            text: 
+              format: "%.1f°"
+              args: [ id(outdoor_temperature).get_state() ]
+    - id: media_player_page
+      widgets:
+        - label:
+            id: track_name_widget
+            text_font: roboto
+            align: CENTER
+            max_width: 80%
+            width: 80%
+            text_align: CENTER
+            long_mode: DOT
+            y: -25
+        - label:
+            id: track_artist_widget
+            text_font: roboto
+            align: CENTER
+            max_width: 90%
+            width: 90%
+            text_align: CENTER
+            long_mode: DOT
+            y: 0
+        - label:
+            id: track_album_widget
+            text_font: roboto
+            align: CENTER
+            max_width: 80%
+            width: 80%
+            text_align: CENTER
+            long_mode: DOT
+            y: 25
+        - arc:
+            id: volume_control_widget
+            adv_hittest: true
+            align: CENTER
+            width: 90%
+            height: 90%
+            adjustable: true
+            on_release:
+                - homeassistant.action:
+                    action: media_player.volume_set
+                    data:
+                      entity_id: $mediaplayer
+                      volume_level: !lambda return (x / 100);
