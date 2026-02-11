@@ -1,121 +1,404 @@
+substitutions:
+  name: "m5dial"
+  friendly_name: "M5Dial"
+  mediaplayer: media_player.owntone_server # Replace with a suitable media player entity
+  weather: sensor.weather                # Replace with a weather entity from HA
+  screensaver: 5 min                       # Timeout for how long the screen stays on after last interaction
+  sdapin: GPIO11
+  sclpin: GPIO12
+  tint: GPIO0    # internal touch interrupt on GPIO0 (unused here, but kept for compatibility)
+  tres: GPIO8
+  dcpin: GPIO4
+  bkpin: GPIO9
+  clpin: GPIO6
+  mopin: GPIO5
+  cspin: GPIO7
+
 esphome:
-  name: m5stack-dial
-  friendly_name: M5Stack Dial
+  name: ${name}
+  friendly_name: ${friendly_name}
   on_boot:
-    then:
-      - pcf8563.read_time:
-  platformio_options:
-    board_build.flash_mode: dio
+    - priority: -100
+      then:
+        - script.execute: screentime
+        - lvgl.label.update:
+            id: date_widget
+            text:
+              time_format: "%A %b %d"
+              time: esptime
 
 esp32:
-  variant: esp32s3
+  board: esp32-s3-devkitc-1
   framework:
-    type: esp-idf
+    type: arduino
 
 wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
   ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
 
 captive_portal:
 
+logger:
+  level: DEBUG
+
 api:
-  port: 6053
-  batch_delay: 50ms
-  listen_backlog: 2
-  max_connections: 6
-  max_send_queue: 10
   encryption:
     key: !secret api_encryption_key
-  reboot_timeout: 30min
 
 ota:
-
-logger:
+  platform: esphome
+  password: !secret ota_password
 
 i2c:
-  - id: internal_i2c
+  - id: bus_internal
     sda: GPIO11
     scl: GPIO12
-
-rc522_i2c:
-  - id: nfc_reader
-    i2c_id: internal_i2c
-    address: 0x28
-
-output:
-  - platform: ledc
-    pin: GPIO3
-    id: buzzer
-  - platform: ledc
-    pin: GPIO9
-    id: backlight_output
-
-rtttl:
-  output: buzzer
-
-sensor:
-  - platform: rotary_encoder
-    id: encoder
-    pin_a: GPIO40
-    pin_b: GPIO41
-
-time:
-  # RTC
-  - platform: pcf8563
-    id: rtctime
-    i2c_id: internal_i2c
-    address: 0x51
-    update_interval: never
-  - platform: homeassistant
-    id: esptime
-    on_time_sync:
-      then:
-        - pcf8563.write_time:
-
-binary_sensor:
-  - platform: gpio
-    name: Button
-    id: front_button
-    pin: GPIO42
-
-  - platform: gpio
-    name: Hold Button
-    pin: GPIO46
+    scan: False
 
 spi:
-  id: spi_bus
   mosi_pin: GPIO5
   clk_pin: GPIO6
 
 display:
   - platform: ili9xxx
-    id: round_display
     model: GC9A01A
+    id: watchface
     cs_pin: GPIO7
-    reset_pin: GPIO8
     dc_pin: GPIO4
+    reset_pin: GPIO8
     invert_colors: true
-    lambda: |-
-      auto now = id(esptime).now();
-      if (now.is_valid()) {
-        it.strftime(120, 120, id(roboto24), TextAlign::CENTER, "%H:%M", now);
-      } else {
-        it.print(120, 120, id(roboto24), TextAlign::CENTER, "--:--");
-      }
+    rotation: 0
+    dimensions:
+      width: 240
+      height: 240
 
-touchscreen:
-  - platform: ft5x06
-    id: touch
-    i2c_id: internal_i2c
-    address: 0x38
+output:
+  - id: oledbacklight
+    platform: ledc
+    pin: GPIO9
+    max_power: 1
+    min_power: 0.1
 
 light:
   - platform: monochromatic
-    name: "Backlight"
-    output: backlight_output
-    id: display_backlight
-    default_transition_length: 0s
+    output: oledbacklight
+    name: "Display Backlight"
+    id: back_light
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 250ms
+
+binary_sensor:
+  - platform: gpio
+    pin: GPIO42
+    id: backlightbutton
+    name: "Backlight Button"
+  - platform: template
+    id: is_playing
+    lambda: 'return id(music_state).state == "playing";'
+    filters:
+      - delayed_off: 1300ms
+    on_press:
+      then:
+        - lvgl.page.show: media_player_page
+    on_release:
+      then:
+        - lvgl.page.show: time_page
+  - platform: template
+    id: pomodoro_timer_active
+    name: "Pomodoro Active"
+    lambda: 'return id(pomodoro_state).state == "active";'
+    on_state:
+      then:
+        - if:
+            condition:
+              - binary_sensor.is_on: pomodoro_timer_active
+            then:
+              - lvgl.page.show: pomodoro_page
+            else:
+              - lvgl.page.show: time_page
+
+sensor:
+  - platform: rotary_encoder
+    name: "Rotary Encoder"
+    id: rotaryencoder
+    pin_a:
+      number: GPIO40
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO41
+      mode:
+        input: true
+        pullup: true
+    resolution: 1
+    on_clockwise:
+      then:
+        - logger.log: "Rotary Encoder Clockwise"
+    on_anticlockwise:
+      then:
+        - logger.log: "Rotary Encoder Anticlockwise"
+  - platform: homeassistant
+    id: outdoor_temperature
+    entity_id: ${weather}
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: temp_widget
+            text:
+              format: "%.1f°"
+              args: [ 'id(outdoor_temperature).get_state()' ]
+  - platform: homeassistant
+    id: media_player_volume
+    entity_id: ${mediaplayer}
+    attribute: volume_level
+    on_value:
+      - lvgl.arc.update:
+          id: volume_control_widget
+          value: !lambda return (x * 100);
+  - platform: template
+    id: pomodoro_timer
+    lambda: |-
+      if (id(pomodoro_timer_active).state) {
+        struct tm tm_finish{}, tm_now{};
+        time_t t_finish, t_now;
+        double remain;
+        /* parse ISO-8601 string from HA */
+        strptime(id(finishes_text).state.c_str(), "%Y-%m-%dT%T", &tm_finish);
+        t_finish = mktime(&tm_finish) + 3600;  // add 1h for local tz
+        /* current time from HA time component */
+        tm_now = id(ha_time).now().to_c_tm();
+        t_now    = mktime(&tm_now);
+        remain   = difftime(t_finish, t_now);
+        return remain > 0 ? (long)remain : 0;
+      }
+      return 0;
+    update_interval: 1s
+    unit_of_measurement: "s"
+    on_value:
+      then:
+        - lvgl.arc.update:
+            id: pomodoro_arc
+            value: !lambda >-
+              long total = id(pomodoro_duration_sec);
+              long rem   = id(pomodoro_timer).state;
+              return total ? (360 * rem) / total : 0;
+        - lvgl.label.update:
+            id: pomodoro_label
+            text: !lambda >-
+              int m = (id(pomodoro_timer).state) / 60;
+              return (m > 0 && id(pomodoro_timer_active).state) ? to_string(m) + "m" : "0m";
+
+text_sensor:
+  - platform: homeassistant
+    name: "Display Text"
+    entity_id: input_text.matrix_display_text
+    id: display_text
+  - platform: homeassistant
+    id: music_state
+    entity_id: ${mediaplayer}
+  - platform: homeassistant
+    id: track_name
+    entity_id: ${mediaplayer}
+    attribute: media_title
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: track_name_widget
+            text: !lambda return id(track_name).state;
+  - platform: homeassistant
+    id: track_artist
+    entity_id: ${mediaplayer}
+    attribute: media_artist
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: track_artist_widget
+            text: !lambda return id(track_artist).state;
+  - platform: homeassistant
+    id: track_album
+    entity_id: ${mediaplayer}
+    attribute: media_album_name
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: track_album_widget
+            text: !lambda return id(track_album).state;
+  - platform: homeassistant
+    id: pomodoro_state
+    entity_id: timer.pomodoro
+  - platform: homeassistant
+    id: duration_text
+    entity_id: timer.pomodoro
+    attribute: duration
+    on_value:
+      then:
+        - lambda: id(pomodoro_duration_sec) = ::atol(id(duration_text).state.c_str());
+  - platform: homeassistant
+    id: finishes_text
+    entity_id: timer.pomodoro
+    attribute: finishes_at
+  - platform: homeassistant
+    id: pomodoro_color_text
+    entity_id: input_text.pomodoro_color
+    on_value:
+      then:
+        - lvgl.arc.update:
+            id: pomodoro_arc
+            arc_color: !lambda return lv_color_hex(strtol(id(pomodoro_color_text).state.c_str(), NULL, 16));
 
 font:
   - file: "gfonts://Roboto"
-    id: roboto24
-    size: 24
+    id: roboto
+    size: 18
+    glyphsets:
+      - GF_Latin_Kernel
+
+time:
+  - platform: homeassistant
+    id: ha_time
+  - platform: sntp
+    timezone: "Europe/Warsaw"
+    id: esptime
+    on_time:
+      - cron: '1 * * * * *'     # every second
+        then:
+          - lvgl.label.update:
+              id: time_widget
+              text:
+                time_format: "%H:%m:%S"
+                time: esptime
+      - hours: 0
+        then:
+          - lvgl.label.update:
+              id: date_widget
+              text:
+                time_format: "%A %b %d"
+                time: esptime
+
+script:
+  - id: screentime
+    mode: restart
+    then:
+      - light.turn_on: back_light
+      - delay: ${screensaver}
+      - light.turn_off: back_light
+  - id: screenoff
+    then:
+      - script.stop: screentime
+      - light.turn_off: back_light
+
+lvgl:
+  buffer_size: 25%
+  displays:
+    - watchface
+  theme:
+    label:
+      text_font: montserrat_18
+      text_color: 0xFFFFFF
+  top_layer:
+    widgets:
+      - label:
+          id: time_widget
+          align: CENTER
+          y: 95
+          text:
+            time_format: "%H:%m:%S"
+            time: esptime
+          on_short_click:
+            then:
+              - script.execute: screenoff
+      - label:
+          id: date_widget
+          align: CENTER
+          y: 80
+          text:
+            time_format: "%A %b %d"
+            time: esptime
+          on_short_click:
+            then:
+              - script.execute: screenoff
+  pages:
+    - id: time_page
+      bg_color: 0x000000
+      widgets:
+        - label:
+            align: CENTER
+            id: temp_widget
+            y: -100
+            text:
+              format: "%.1f°"
+              args: [ 'id(outdoor_temperature).get_state()' ]
+    - id: media_player_page
+      bg_color: 0x000000
+      widgets:
+        - label:
+            id: track_name_widget
+            text_font: roboto
+            align: CENTER
+            max_width: 80%
+            width: 80%
+            text_align: CENTER
+            long_mode: DOT
+            y: -25
+        - label:
+            id: track_artist_widget
+            text_font: roboto
+            align: CENTER
+            max_width: 90%
+            width: 90%
+            text_align: CENTER
+            long_mode: DOT
+            y: 0
+        - label:
+            id: track_album_widget
+            text_font: roboto
+            align: CENTER
+            max_width: 80%
+            width: 80%
+            text_align: CENTER
+            long_mode: DOT
+            y: 25
+        - arc:
+            id: volume_control_widget
+            adv_hittest: true
+            align: CENTER
+            width: 90%
+            height: 90%
+            adjustable: true
+            on_release:
+              - homeassistant.action:
+                  action: media_player.volume_set
+                  data:
+                    entity_id: ${mediaplayer}
+                    volume_level: !lambda return (x / 100);
+    - id: pomodoro_page
+      bg_color: 0x000000
+      widgets:
+        - arc:
+            id: pomodoro_arc
+            align: CENTER
+            width: 150
+            height: 150
+            start_angle: 0
+            end_angle: 360
+            rotation: 90
+            radius: 60
+            line_width: 0             # fill circle, not outline
+            adjustable: false
+            arc_color: 0xFF0000      # overwritten immediately by HA colour update
+            value: 0                  # updated dynamically
+        - label:
+            id: pomodoro_label
+            align: CENTER
+            y: 30
+            text: "0m"
+
+globals:
+  - id: pomodoro_duration_sec
+    type: int
+    restore_value: no
+    initial_value: '3600'
