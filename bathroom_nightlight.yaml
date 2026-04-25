@@ -1,0 +1,48 @@
+substitutions:
+  device_name: "Bathroom Nightlight"
+  friendly_name: "Bathroom Nightlight"
+
+esphome:
+  name: bathroom-nightlight
+  friendly_name: "${friendly_name}"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+
+output:
+  - platform: ledc
+    pin: GPIO16
+    id: pwm_output
+
+light:
+  - platform: monochromatic
+    output: pwm_output
+    name: "Bathroom Nightlight"
+    id: nightlight
+
+binary_sensor:
+  - platform: gpio
+    pin: GPIO4
+    name: "Bathroom Motion"
+    device_class: motion

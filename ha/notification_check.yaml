@@ -1,0 +1,35 @@
+# REST sensor — add this to configuration.yaml:
+#   rest: !include ha/notification_check_sensor.yaml
+# Or paste the sensor block directly into your rest: section.
+
+# ha/notification_check_sensor.yaml
+rest:
+  - resource: "https://notifications.osmosis.page/api/users/1a8cd90c-66df-44e2-8025-a7c2cf7d0175/badge"
+    scan_interval: 30
+    sensor:
+      - name: "osmosis_notification_badge"
+        unique_id: osmosis_notification_badge
+        value_template: "{{ value_json.has_unread }}"
+
+---
+# Automation — paste into HA automations or add via UI
+alias: "Sync Priority Notification Badge"
+description: "Updates input_boolean.priority_notification when the Osmosis badge changes."
+trigger:
+  - platform: state
+    entity_id: sensor.osmosis_notification_badge
+action:
+  - choose:
+      - conditions:
+          - condition: state
+            entity_id: sensor.osmosis_notification_badge
+            state: "True"
+        sequence:
+          - service: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.priority_notification
+    default:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.priority_notification
+mode: single

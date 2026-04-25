@@ -1,0 +1,60 @@
+substitutions:
+  device_name: "Kitchen Lights"
+  friendly_name: "Kitchen Lights"
+
+esphome:
+  name: kitchen-lights
+  friendly_name: "${friendly_name}"
+
+esp32:
+  board: nodemcu-32s
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+logger:
+
+# PWM outputs driving MOSFETs for 12V light sets
+output:
+  - platform: ledc
+    pin: GPIO4
+    id: pwm_light_1
+    frequency: 1000 Hz
+
+  - platform: ledc
+    pin: GPIO16
+    id: pwm_light_2
+    frequency: 1000 Hz
+
+light:
+  - platform: monochromatic
+    name: "Small Lights"
+    output: pwm_light_1
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: monochromatic
+    name: "Big Lights"
+    output: pwm_light_2
+    restore_mode: RESTORE_DEFAULT_OFF
+
+status_led:
+  pin:
+    number: GPIO2
+    inverted: true

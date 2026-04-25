@@ -1,0 +1,212 @@
+substitutions:
+  device_name: "ePaper Display"
+  friendly_name: "ePaper Display"
+
+esphome:
+  name: epaper-display
+  friendly_name: "${friendly_name}"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [ waveshare_epaper ]
+
+time:
+  - platform: homeassistant
+    id: esptime
+    on_time:
+      - seconds: 0
+        minutes: 0
+        then:
+          - script.execute: update_display
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+
+color:
+  - id: color_red
+    red: 100%
+    green: 0%
+    blue: 0%
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_bar
+    size: 24
+  - file: "gfonts://Roboto"
+    id: font_todo
+    size: 20
+  - file: "gfonts://Noto Sans Symbols 2"
+    id: font_icons
+    size: 24
+    glyphs: "♥🔔"
+
+sensor:
+  - platform: homeassistant
+    id: distractions
+    entity_id: input_number.epaper_distractions
+    on_value:
+      then:
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: pomodoros
+    entity_id: input_number.epaper_pomodoros
+    on_value:
+      then:
+        - script.execute: update_display
+
+binary_sensor:
+  - platform: homeassistant
+    id: date_night
+    entity_id: input_boolean.date_night_today
+    on_state:
+      then:
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: priority_notification
+    entity_id: input_boolean.priority_notification
+    on_state:
+      then:
+        - script.execute: update_display
+
+text_sensor:
+  - platform: homeassistant
+    id: pomodoro_state
+    entity_id: timer.pomodoro
+    on_value:
+      then:
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: todo_1
+    entity_id: input_text.epaper_todo_1
+    on_value:
+      then:
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: todo_2
+    entity_id: input_text.epaper_todo_2
+    on_value:
+      then:
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: todo_3
+    entity_id: input_text.epaper_todo_3
+    on_value:
+      then:
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: todo_4
+    entity_id: input_text.epaper_todo_4
+    on_value:
+      then:
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: todo_5
+    entity_id: input_text.epaper_todo_5
+    on_value:
+      then:
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: todo_6
+    entity_id: input_text.epaper_todo_6
+    on_value:
+      then:
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: todo_7
+    entity_id: input_text.epaper_todo_7
+    on_value:
+      then:
+        - script.execute: update_display
+
+script:
+  - id: update_display
+    mode: restart
+    then:
+      - delay: 500ms
+      - component.update: epaper_display
+
+display:
+  - platform: waveshare_epaper
+    id: epaper_display
+    model: 4.20in3c
+    cs_pin: GPIO5
+    dc_pin: GPIO17
+    reset_pin: GPIO16
+    busy_pin: GPIO4
+    update_interval: never
+    lambda: |-
+      bool pomodoro_active = id(pomodoro_state).has_state() &&
+                             id(pomodoro_state).state == "active";
+
+      // Red border when pomodoro is running
+      if (pomodoro_active) {
+        for (int i = 0; i < 4; i++) {
+          it.filled_rectangle(i,     i,     400 - 2*i, 4,         id(color_red));
+          it.filled_rectangle(i,     296-i, 400 - 2*i, 4,         id(color_red));
+          it.filled_rectangle(i,     i,     4,         300 - 2*i, id(color_red));
+          it.filled_rectangle(396-i, i,     4,         300 - 2*i, id(color_red));
+        }
+      }
+
+      int pad = pomodoro_active ? 8 : 4;
+
+      // Top bar: d:N  p:N  [🔔] [♥]
+      int d = id(distractions).has_state() ? (int)id(distractions).state : 0;
+      int p = id(pomodoros).has_state()    ? (int)id(pomodoros).state    : 0;
+      it.printf(pad + 4, pad + 4, id(font_bar), COLOR_ON, "d:%d  p:%d", d, p);
+      if (id(priority_notification).has_state() && id(priority_notification).state)
+        it.print(336, pad + 4, id(font_icons), id(color_red), "🔔");
+      if (id(date_night).has_state() && id(date_night).state)
+        it.print(364, pad + 4, id(font_icons), id(color_red), "♥");
+
+      // Divider below top bar
+      it.line(pad, pad + 34, 400 - pad, pad + 34);
+
+      // Todo items — skip empty ones
+      text_sensor::TextSensor *todos[] = {
+        id(todo_1), id(todo_2), id(todo_3), id(todo_4),
+        id(todo_5), id(todo_6), id(todo_7)
+      };
+      int y = pad + 42;
+      for (auto *t : todos) {
+        if (t->has_state() && !t->state.empty()) {
+          it.print(pad + 4, y, id(font_todo), COLOR_ON, t->state.c_str());
+          y += 28;
+        }
+      }
