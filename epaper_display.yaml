@@ -65,7 +65,11 @@ font:
   - file: "gfonts://Noto Sans Symbols 2"
     id: font_icons
     size: 24
-    glyphs: "♥🔔"
+    glyphs: "♥"
+  - file: "gfonts://Noto Emoji"
+    id: font_bell
+    size: 24
+    glyphs: "🔔"
 
 sensor:
   - platform: homeassistant
@@ -154,6 +158,13 @@ text_sensor:
       then:
         - script.execute: update_display
 
+  - platform: homeassistant
+    id: today_events
+    entity_id: input_text.epaper_today
+    on_value:
+      then:
+        - script.execute: update_display
+
 script:
   - id: update_display
     mode: restart
@@ -191,22 +202,62 @@ display:
       int p = id(pomodoros).has_state()    ? (int)id(pomodoros).state    : 0;
       it.printf(pad + 4, pad + 4, id(font_bar), COLOR_ON, "d:%d  p:%d", d, p);
       if (id(priority_notification).has_state() && id(priority_notification).state)
-        it.print(336, pad + 4, id(font_icons), id(color_red), "🔔");
+        it.print(336, pad + 4, id(font_bell), id(color_red), "🔔");
       if (id(date_night).has_state() && id(date_night).state)
         it.print(364, pad + 4, id(font_icons), id(color_red), "♥");
 
       // Divider below top bar
       it.line(pad, pad + 34, 400 - pad, pad + 34);
 
-      // Todo items — skip empty ones
-      text_sensor::TextSensor *todos[] = {
+      text_sensor::TextSensor *todos[7] = {
         id(todo_1), id(todo_2), id(todo_3), id(todo_4),
         id(todo_5), id(todo_6), id(todo_7)
       };
-      int y = pad + 42;
+
+      bool any_todo = false;
       for (auto *t : todos) {
-        if (t->has_state() && !t->state.empty()) {
-          it.print(pad + 4, y, id(font_todo), COLOR_ON, t->state.c_str());
-          y += 28;
+        if (t->has_state() && !t->state.empty()) { any_todo = true; break; }
+      }
+
+      int y = pad + 42;
+
+      if (any_todo) {
+        for (auto *t : todos) {
+          if (t->has_state() && !t->state.empty()) {
+            it.print(pad + 4, y, id(font_todo), COLOR_ON, t->state.c_str());
+            y += 28;
+          }
+        }
+      } else {
+        // Day overview: date header + calendar events
+        it.strftime(pad + 4, y, id(font_bar), id(color_red), "%A · %d %b", id(esptime).now());
+        y += 30;
+        for (int x2 = pad; x2 < 400 - pad; x2 += 6)
+          it.draw_pixel_at(x2, y, COLOR_ON);
+        y += 8;
+
+        if (id(today_events).has_state() && !id(today_events).state.empty()) {
+          std::string raw = id(today_events).state;
+          size_t pos = 0;
+          while (pos <= raw.size() && y < 290) {
+            size_t end = raw.find('|', pos);
+            if (end == std::string::npos) end = raw.size();
+            std::string ev = raw.substr(pos, end - pos);
+            pos = end + 1;
+            if (ev.empty()) continue;
+
+            if (isdigit((unsigned char)ev[0])) {
+              // "HH:MM Title" — time in red, title in black
+              size_t sp = ev.find(' ');
+              if (sp != std::string::npos) {
+                it.printf(pad + 4,  y, id(font_todo), id(color_red), "%.*s", (int)sp, ev.c_str());
+                it.printf(pad + 56, y, id(font_todo), COLOR_ON, "%s", ev.c_str() + sp + 1);
+              }
+            } else {
+              // "* Title" all-day event
+              it.printf(pad + 4, y, id(font_todo), COLOR_ON, "· %s", ev.c_str() + 2);
+            }
+            y += 28;
+          }
         }
       }
