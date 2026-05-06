@@ -43,12 +43,15 @@ globals:
   - id: blink_state
     type: bool
     initial_value: 'false'
+  - id: led_brightness
+    type: float
+    initial_value: '0.5'
 
 light:
   # GPIO16: power indicator — green blink ≤100W, gradient 100–2000W, red blink ≥2000W
   - platform: neopixelbus
-    type: GRB
-    variant: WS2812
+    type: WRGB
+    variant: SK6812
     pin: GPIO16
     num_leds: 1
     id: power_led
@@ -58,8 +61,8 @@ light:
 
   # GPIO4: price indicator — green blink <0, gradient 0–1.80, red blink ≥1.80
   - platform: neopixelbus
-    type: GRB
-    variant: WS2812
+    type: WRGB
+    variant: SK6812
     pin: GPIO4
     num_leds: 1
     id: price_led
@@ -67,80 +70,95 @@ light:
     default_transition_length: 0s
     restore_mode: ALWAYS_OFF
 
+number:
+  # Brightness control for LED indicators
+  - platform: template
+    name: "LED Brightness"
+    id: led_brightness_control
+    unit_of_measurement: "%"
+    min_value: 10
+    max_value: 100
+    step: 5
+    optimistic: true
+    set_action:
+      then:
+        - lambda: |-
+            id(led_brightness) = x / 100.0f;
+
 interval:
   - interval: 500ms
     then:
       - lambda: |-
           id(blink_state) = !id(blink_state);
 
-          float power = id(current_power).state;
-          if (!isnan(power)) {
-            if (power >= 2000.0f) {
-              if (id(blink_state)) {
-                auto call = id(power_led).turn_on();
-                call.set_rgb(1.0f, 0.0f, 0.0f);
-                call.set_brightness(0.5f);
-                call.set_transition_length(0);
-                call.perform();
-              } else {
-                auto call = id(power_led).turn_off();
-                call.set_transition_length(0);
-                call.perform();
-              }
-            } else if (power <= 100.0f) {
-              if (id(blink_state)) {
-                auto call = id(power_led).turn_on();
-                call.set_rgb(0.0f, 1.0f, 0.0f);
-                call.set_brightness(0.5f);
-                call.set_transition_length(0);
-                call.perform();
-              } else {
-                auto call = id(power_led).turn_off();
-                call.set_transition_length(0);
-                call.perform();
-              }
-            } else {
-              float ratio = (power - 100.0f) / (2000.0f - 100.0f);
-              auto call = id(power_led).turn_on();
-              call.set_rgb(ratio, 1.0f - ratio, 0.0f);
-              call.set_brightness(0.5f);
-              call.set_transition_length(0);
-              call.perform();
-            }
-          }
+           float power = id(current_power).state;
+           if (!isnan(power)) {
+             if (power >= 2000.0f) {
+               if (id(blink_state)) {
+                 auto call = id(power_led).turn_on();
+                 call.set_rgb(1.0f, 0.0f, 0.0f);
+                 call.set_brightness(id(led_brightness));
+                 call.set_transition_length(0);
+                 call.perform();
+               } else {
+                 auto call = id(power_led).turn_off();
+                 call.set_transition_length(0);
+                 call.perform();
+               }
+             } else if (power <= 100.0f) {
+               if (id(blink_state)) {
+                 auto call = id(power_led).turn_on();
+                 call.set_rgb(0.0f, 1.0f, 0.0f);
+                 call.set_brightness(id(led_brightness));
+                 call.set_transition_length(0);
+                 call.perform();
+               } else {
+                 auto call = id(power_led).turn_off();
+                 call.set_transition_length(0);
+                 call.perform();
+               }
+             } else {
+               float ratio = (power - 100.0f) / (2000.0f - 100.0f);
+               auto call = id(power_led).turn_on();
+               call.set_rgb(ratio, 1.0f - ratio, 0.0f);
+               call.set_brightness(id(led_brightness));
+               call.set_transition_length(0);
+               call.perform();
+             }
+           }
 
-          float price = id(current_buy_price).state;
-          if (!isnan(price)) {
-            if (price < 0.0f) {
-              if (id(blink_state)) {
-                auto call = id(price_led).turn_on();
-                call.set_rgb(0.0f, 1.0f, 0.0f);
-                call.set_brightness(0.5f);
-                call.set_transition_length(0);
-                call.perform();
-              } else {
-                auto call = id(price_led).turn_off();
-                call.set_transition_length(0);
-                call.perform();
-              }
-            } else if (price >= 1.80f) {
-              if (id(blink_state)) {
-                auto call = id(price_led).turn_on();
-                call.set_rgb(1.0f, 0.0f, 0.0f);
-                call.set_brightness(0.5f);
-                call.set_transition_length(0);
-                call.perform();
-              } else {
-                auto call = id(price_led).turn_off();
-                call.set_transition_length(0);
-                call.perform();
-              }
-            } else {
-              float ratio = price / 1.80f;
-              auto call = id(price_led).turn_on();
-              call.set_rgb(ratio, 1.0f - ratio, 0.0f);
-              call.set_brightness(0.5f);
-              call.set_transition_length(0);
-              call.perform();
-            }
-          }
+           float price = id(current_buy_price).state;
+           if (!isnan(price)) {
+             if (price < 0.0f) {
+               if (id(blink_state)) {
+                 auto call = id(price_led).turn_on();
+                 call.set_rgb(0.0f, 1.0f, 0.0f);
+                 call.set_brightness(id(led_brightness));
+                 call.set_transition_length(0);
+                 call.perform();
+               } else {
+                 auto call = id(price_led).turn_off();
+                 call.set_transition_length(0);
+                 call.perform();
+               }
+             } else if (price >= 1.80f) {
+               if (id(blink_state)) {
+                 auto call = id(price_led).turn_on();
+                 call.set_rgb(1.0f, 0.0f, 0.0f);
+                 call.set_brightness(id(led_brightness));
+                 call.set_transition_length(0);
+                 call.perform();
+               } else {
+                 auto call = id(price_led).turn_off();
+                 call.set_transition_length(0);
+                 call.perform();
+               }
+             } else {
+               float ratio = price / 1.80f;
+               auto call = id(price_led).turn_on();
+               call.set_rgb(ratio, 1.0f - ratio, 0.0f);
+               call.set_brightness(id(led_brightness));
+               call.set_transition_length(0);
+               call.perform();
+             }
+           }
