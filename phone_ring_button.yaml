@@ -6,22 +6,6 @@ substitutions:
 esphome:
   name: phone-ring-button
   friendly_name: "${friendly_name}"
-  on_boot:
-    priority: -100
-    then:
-      - http_request.get:
-          url: "https://kv.osmosis.page/kv/ONLOC_API_KEY"
-          headers:
-            X-API-Key: !secret kv_api_key
-          on_response:
-            then:
-              - lambda: |-
-                  if (response->status_code == 200) {
-                    id(onloc_api_key) = body;
-                    ESP_LOGI("ring", "ONLOC API key fetched OK");
-                  } else {
-                    ESP_LOGE("ring", "Failed to fetch ONLOC API key: %d", response->status_code);
-                  }
 
 esp32:
   board: nodemcu-32s
@@ -47,21 +31,14 @@ ota:
 
 logger:
 
-globals:
-  - id: onloc_api_key
-    type: std::string
-    restore_value: false
-    initial_value: '""'
-
 http_request:
   useragent: esphome/phone-ring-button
   timeout: 10s
 
-# Button on GPIO0 (boot button on NodeMCU) — change pin as needed
 binary_sensor:
   - platform: gpio
     pin:
-      number: GPIO0
+      number: GPIO14
       mode:
         input: true
         pullup: true
@@ -73,8 +50,8 @@ binary_sensor:
       then:
         - http_request.post:
             url: "https://timeline.osmosis.page/api/devices/${onloc_device_id}/ring"
-            headers:
-              Authorization: !lambda return "Bearer " + id(onloc_api_key);
+            request_headers:
+              Authorization: !secret onloc_api_key
             on_response:
               then:
                 - logger.log:

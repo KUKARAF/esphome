@@ -1,6 +1,7 @@
 substitutions:
   device_name: "Kitchen Lights"
   friendly_name: "Kitchen Lights"
+  switch_pin: GPIO14
 
 esphome:
   name: kitchen-lights
@@ -45,14 +46,30 @@ output:
 
 light:
   - platform: monochromatic
+    id: light_small
     name: "Small Lights"
     output: pwm_light_1
     restore_mode: RESTORE_DEFAULT_OFF
 
   - platform: monochromatic
+    id: light_big
     name: "Big Lights"
     output: pwm_light_2
     restore_mode: RESTORE_DEFAULT_OFF
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: "${switch_pin}"
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Stove Switch"
+    on_press:
+      then:
+        - light.turn_on: light_big
+    on_release:
+      then:
+        - light.turn_off: light_big
 
 status_led:
   pin:
