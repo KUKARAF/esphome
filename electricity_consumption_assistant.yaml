@@ -81,7 +81,11 @@ number:
     min_value: 10
     max_value: 100
     step: 5
+    restore_value: true
+    initial_value: 50
     optimistic: true
+    lambda: |-
+      return id(led_brightness) * 100.0f;
     set_action:
       then:
         - lambda: |-
