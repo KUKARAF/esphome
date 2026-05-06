@@ -53,7 +53,6 @@ light:
     chipset: SK6812
     pin: GPIO16
     num_leds: 1
-    rmt_channel: 0
     rgb_order: RGB
     is_wrgb: true
     id: power_led
@@ -66,7 +65,6 @@ light:
     chipset: SK6812
     pin: GPIO4
     num_leds: 1
-    rmt_channel: 1
     rgb_order: RGB
     is_wrgb: true
     id: price_led
