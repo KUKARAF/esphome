@@ -49,22 +49,26 @@ globals:
 
 light:
   # GPIO16: power indicator — green blink ≤100W, gradient 100–2000W, red blink ≥2000W
-  - platform: neopixelbus
-    type: WRGB
-    variant: SK6812
+  - platform: esp32_rmt_led_strip
+    chipset: SK6812
     pin: GPIO16
     num_leds: 1
+    rmt_channel: 0
+    rgb_order: RGB
+    is_wrgb: true
     id: power_led
     name: "Power LED"
     default_transition_length: 0s
     restore_mode: ALWAYS_OFF
 
   # GPIO4: price indicator — green blink <0, gradient 0–1.80, red blink ≥1.80
-  - platform: neopixelbus
-    type: WRGB
-    variant: SK6812
+  - platform: esp32_rmt_led_strip
+    chipset: SK6812
     pin: GPIO4
     num_leds: 1
+    rmt_channel: 1
+    rgb_order: RGB
+    is_wrgb: true
     id: price_led
     name: "Price LED"
     default_transition_length: 0s
