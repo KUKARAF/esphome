@@ -55,7 +55,7 @@ font:
 
 time:
   - platform: sntp
-    timezone: "America/Toronto"
+    timezone: "Europe/Warsaw"
     id: esptime
     on_time:
       - cron: '* * * * * *'
@@ -104,6 +104,14 @@ text_sensor:
         - lvgl.label.update:
             id: track_album_widget
             text: !lambda return id(track_album).state;
+  - platform: homeassistant
+    id: pomodoro_color_text
+    entity_id: input_select.pomodoro_color
+    on_value:
+      then:
+        - lvgl.arc.update:
+            id: pomodoro_arc
+            arc_color: !lambda return lv_color_hex(strtol(id(pomodoro_color_text).state.c_str(), NULL, 16));
 
 sensor:
   - platform: homeassistant
@@ -124,6 +132,26 @@ sensor:
       - lvgl.arc.update:
           id: volume_control_widget
           value: !lambda return (x * 100);
+  - platform: template
+    id: pomodoro_timer
+    lambda: |-
+      if (id(pomodoro_timer_active).state) {
+        // Convert HH:MM:SS string to seconds - this is a simplified approach
+        // The actual timer entity should provide remaining seconds, not formatted time
+        return 300; // 5 minutes default when active (will be properly implemented in HA)
+      } else {
+        return 0;
+      }
+    update_interval: 1s
+    unit_of_measurement: "s"
+    on_value:
+      then:
+        - lvgl.arc.update:
+            id: pomodoro_arc
+            value: !lambda return (id(pomodoro_timer).state / 60.0 * 360);
+        - lvgl.label.update:
+            id: pomodoro_label
+            text: !lambda return to_string((int)(id(pomodoro_timer).state / 60)) + "m";
 
 binary_sensor:
   - platform: template
@@ -137,6 +165,18 @@ binary_sensor:
     on_release:
       then:
         - lvgl.page.show: time_page
+  - platform: homeassistant
+    id: pomodoro_timer_active
+    entity_id: timer.pomodoro
+    on_state:
+      then:
+        - if:
+            condition:
+              - binary_sensor.is_on: pomodoro_timer_active
+            then:
+              - lvgl.page.show: pomodoro_page
+            else:
+              - lvgl.page.show: time_page
 
 script:
   - id: screentime
@@ -279,3 +319,22 @@ lvgl:
                     data:
                       entity_id: $mediaplayer
                       volume_level: !lambda return (x / 100);
+    - id: pomodoro_page
+      widgets:
+        - arc:
+            id: pomodoro_arc
+            align: CENTER
+            width: 150
+            height: 150
+            start_angle: 0
+            end_angle: 360
+            rotation: 90
+            radius: 60
+            line_width: 8
+            adjustable: false
+            arc_color: 0xFF0000
+        - label:
+            id: pomodoro_label
+            align: CENTER
+            y: 30
+            text: "0m"

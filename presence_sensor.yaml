@@ -38,8 +38,6 @@ binary_sensor:
     pin: GPIO13
     name: "${device_name} Presence"
     device_class: motion
-    filters:
-      - delayed_off: 5s  # Keep the presence detected for 30 seconds after last motion
     on_press:
       then:
         - logger.log: "Motion detected"
