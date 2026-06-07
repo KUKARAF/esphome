@@ -41,8 +41,23 @@ light:
     name: "Bathroom Nightlight"
     id: nightlight
 
-binary_sensor:
-  - platform: gpio
-    pin: GPIO4
-    name: "Bathroom Motion"
-    device_class: motion
+sensor:
+  - platform: adc
+    pin: GPIO34
+    id: ntc_source
+    update_interval: 10s
+    attenuation: 12db
+
+  - platform: resistance
+    id: ntc_resistance
+    sensor: ntc_source
+    configuration: DOWNSTREAM
+    resistor: 10kOhm
+
+  - platform: ntc
+    sensor: ntc_resistance
+    name: "Bathroom Temperature"
+    calibration:
+      b_constant: 3661
+      reference_resistance: 10kOhm
+      reference_temperature: 25°C
