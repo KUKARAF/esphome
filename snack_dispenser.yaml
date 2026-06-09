@@ -87,7 +87,9 @@ binary_sensor:
 
 switch:
   - platform: gpio
-    pin: GPIO13
+    pin:
+      number: GPIO13
+      inverted: true
     id: muscle_wire
     restore_mode: ALWAYS_OFF
     internal: true
