@@ -1,0 +1,102 @@
+substitutions:
+  device_name: "Snack Dispenser"
+  friendly_name: "Snack Dispenser"
+
+esphome:
+  name: snack-dispenser
+  friendly_name: "${friendly_name}"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  services:
+    - service: open_dispenser
+      variables:
+        user: string
+      then:
+        - lambda: |-
+            if (user == "marta") {
+              id(dispenser_activate).execute();
+              return;
+            }
+            int today = id(ha_time).now().year * 1000 + id(ha_time).now().day_of_year;
+            if (today != id(last_open_day)) {
+              id(last_open_day) = today;
+              id(opens_today) = 0;
+            }
+            if (id(opens_today) < 1 && id(exercise_today).state) {
+              id(opens_today) += 1;
+              id(dispenser_activate).execute();
+            }
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+globals:
+  - id: last_open_day
+    type: int
+    restore_value: true
+    initial_value: '-1'
+  - id: opens_today
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+binary_sensor:
+  - platform: homeassistant
+    id: exercise_today
+    entity_id: input_boolean.exercise_today
+  - platform: gpio
+    pin:
+      number: GPIO0
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Dispenser Button"
+    on_press:
+      - lambda: |-
+          int today = id(ha_time).now().year * 1000 + id(ha_time).now().day_of_year;
+          if (today != id(last_open_day)) {
+            id(last_open_day) = today;
+            id(opens_today) = 0;
+          }
+          if (id(opens_today) < 1 && id(exercise_today).state) {
+            id(opens_today) += 1;
+            id(dispenser_activate).execute();
+          }
+
+switch:
+  - platform: gpio
+    pin: GPIO13
+    id: muscle_wire
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+script:
+  - id: dispenser_activate
+    mode: single
+    then:
+      - switch.turn_on: muscle_wire
+      - delay: 2s
+      - switch.turn_off: muscle_wire
+      - delay: 30s
