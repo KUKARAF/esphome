@@ -31,6 +31,8 @@ substitutions:
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
+  includes:
+    - m5dial_anim.h
   on_boot:
     priority: -100
     then:
@@ -481,15 +483,16 @@ script:
     mode: single
     then:
       # SELECT: colored bg + white icon. DIM: gray bg (brightness) + room-colored icon.
-      - lvgl.widget.update:
-          id: bg
-          bg_color: !lambda |-
-            if (!id(dim_mode) || id(sel) >= ${num_lights}) {
-              static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644};
-              return lv_color_hex(c[id(sel)]);
-            }
+      - lambda: |-
+          lv_color_t target;
+          if (!id(dim_mode) || id(sel) >= ${num_lights}) {
+            static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644};
+            target = lv_color_hex(c[id(sel)]);
+          } else {
             uint8_t v = (uint8_t)id(current_brightness);
-            return lv_color_make(v, v, v);
+            target = lv_color_make(v, v, v);
+          }
+          m5dial_animate_bg(id(bg), target, 300);
       - lvgl.label.update:
           id: lbl_icon
           text: !lambda return id(current_icon);
@@ -581,14 +584,13 @@ script:
             "children:d=16,o=5,b=200:4f7,1p,4g#7,8g7,4d#7,1p,4g#7,8g7,4c7,1p,4g#7,8g7,4g#6,1p,f6,g6,g#6,c7,4f7,1p",
             "Smurfs:d=32,o=5,b=200:4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8f#,p,8a#,p,4g#,4p,g#,p,a#,p,b,p,c6,p,4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8b,p,8f,p,4f#",
             "TakeOnMe:d=4,o=4,b=160:8f#5,8f#5,8f#5,8d5,8p,8b,8p,8e5,8p,8e5,8p,8e5,8g#5,8g#5,8a5,8b5,8a5,8a5,8a5,8e5,8p,8d5,8p,8f#5,8p,8f#5,8p,8f#5,8e5,8e5,8f#5,8e5,8f#5,8f#5,8f#5,8d5,8p,8b,8p,8e5,8p,8e5,8p,8e5,8g#5,8g#5,8a5,8b5,8a5,8a5,8a5,8e5,8p,8d5,8p,8f#5,8p,8f#5,8p,8f#5,8e5,8e5",
-            "Muminki:d=8,o=5,b=112:16e,16d,16c,16d,e,a4,16f,16e,16d,16e,f,b4,16a,16g,16f,16g,e,d,e,a,b,16a,16g,16f,16g,e,d,c,d,e",
             "Gadget:d=16,o=5,b=50:32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,32d#,32f,32f#,32g#,a#,d#6,4d6,32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,8d#",
-            "MahnaMahna:d=16,o=6,b=125:c#,c.,b5,8a#.5,8f.,4g#,a#,g.,4d#,8p,c#,c.,b5,8a#.5,8f.,g#.,8a#.,4g,8p,c#,c.,b5,8a#.5,8f.,4g#,f,g.,8d#.,f,g.,8d#.,f,8g,8d#.,f,8g,d#,8c,a#5,8d#.,8d#.,4d#,8d#."
+            "NeverGonna:d=4,o=5,b=200:8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,d6,8p,d6,8p,c6,8b,a.,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6.,p,8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,2g6,b,c6.,8b,a,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6."
           };
-          return std::string(tunes[rand() % 6]);
+          return std::string(tunes[rand() % 5]);
 
 lvgl:
-  buffer_size: 25%
+  buffer_size: 50%
   displays:
     - watchface
   theme:
