@@ -1,31 +1,42 @@
 substitutions:
   name: "m5dial"
   friendly_name: "M5Dial"
-  mediaplayer: media_player.owntone_server # Replace with a suitable media player entity
-  weather: sensor.weather                # Replace with a weather entity from HA
-  screensaver: 5 min                       # Timeout for how long the screen stays on after last interaction
+  screensaver: "5min"
+  # ──── Lights ────────────────────────────────────────────────────────────────
+  # Set num_lights to match the number of light slots below (max: add more blocks).
+  # To add a light: add substitutions, a brN global, a sensor block, and an if-block
+  # in the get_current_light script.
+  num_lights: "4"
+  light0_entity: "light.bathroom_nightlight_bathroom_nightlight"
+  light0_name:   "Bathroom"
+  light1_entity: "light.kitchen_lights_small_lights"
+  light1_name:   "Kitchen Small"
+  light2_entity: "light.kitchen_lights_big_lights"
+  light2_name:   "Kitchen Big"
+  light3_entity: "light.desk_light_desk_light"
+  light3_name:   "Desk"
+  # ──── Action items ──────────────────────────────────────────────────────────
+  # num_items = num_lights + number of action slots (egg timer + find phone = 2)
+  num_items: "6"
+  phone_ring_entity: "button.fmd_rafa_volume_ring_device"
+  # ────────────────────────────────────────────────────────────────────────────
   sdapin: GPIO11
   sclpin: GPIO12
-  tint: GPIO0    # internal touch interrupt on GPIO0 (unused here, but kept for compatibility)
   tres: GPIO8
   dcpin: GPIO4
   bkpin: GPIO9
   clpin: GPIO6
   mopin: GPIO5
   cspin: GPIO7
-
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   on_boot:
-    - priority: -100
-      then:
-        - script.execute: screentime
-        - lvgl.label.update:
-            id: date_widget
-            text:
-              time_format: "%A %b %d"
-              time: esptime
+    priority: -100
+    then:
+      - script.execute: get_current_light
+      - script.execute: screentime
+      - script.execute: update_display
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -35,6 +46,7 @@ esp32:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  fast_connect: true
   ap:
     ssid: "${friendly_name} Fallback"
     password: !secret wifi_password
@@ -54,33 +66,53 @@ ota:
 
 i2c:
   - id: bus_internal
-    sda: GPIO11
-    scl: GPIO12
-    scan: False
+    sda: ${sdapin}
+    scl: ${sclpin}
+    scan: false
 
 spi:
-  mosi_pin: GPIO5
-  clk_pin: GPIO6
+  mosi_pin: ${mopin}
+  clk_pin: ${clpin}
 
 display:
   - platform: ili9xxx
     model: GC9A01A
     id: watchface
-    cs_pin: GPIO7
-    dc_pin: GPIO4
-    reset_pin: GPIO8
+    cs_pin: ${cspin}
+    dc_pin: ${dcpin}
+    reset_pin: ${tres}
     invert_colors: true
     rotation: 0
     dimensions:
       width: 240
       height: 240
 
+touchscreen:
+  - platform: ft5x06
+    id: ts
+    i2c_id: bus_internal
+    address: 0x38
+    on_touch:
+      then:
+        - lambda: |-
+            if (id(sel) == ${num_lights}) {
+              id(timer_beep).execute();
+            } else if (id(dim_mode) && id(sel) < ${num_lights}) {
+              id(toggle_light).execute();
+            }
+
 output:
   - id: oledbacklight
     platform: ledc
-    pin: GPIO9
+    pin: ${bkpin}
     max_power: 1
     min_power: 0.1
+  - id: buzzer
+    platform: ledc
+    pin: GPIO3
+
+rtttl:
+  output: buzzer
 
 light:
   - platform: monochromatic
@@ -90,194 +122,254 @@ light:
     restore_mode: ALWAYS_OFF
     default_transition_length: 250ms
 
-binary_sensor:
-  - platform: gpio
-    pin: GPIO42
-    id: backlightbutton
-    name: "Backlight Button"
-  - platform: template
-    id: is_playing
-    lambda: 'return id(music_state).state == "playing";'
-    filters:
-      - delayed_off: 1300ms
-    on_press:
-      then:
-        - lvgl.page.show: media_player_page
-    on_release:
-      then:
-        - lvgl.page.show: time_page
-  - platform: template
-    id: pomodoro_timer_active
-    name: "Pomodoro Active"
-    lambda: 'return id(pomodoro_state).state == "active";'
-    on_state:
-      then:
-        - if:
-            condition:
-              - binary_sensor.is_on: pomodoro_timer_active
-            then:
-              - lvgl.page.show: pomodoro_page
-            else:
-              - lvgl.page.show: time_page
+globals:
+  - id: sel
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: dim_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: current_entity
+    type: std::string
+    restore_value: no
+    initial_value: '"${light0_entity}"'
+  - id: current_name
+    type: std::string
+    restore_value: no
+    initial_value: '"${light0_name}"'
+  - id: current_icon
+    type: std::string
+    restore_value: no
+    initial_value: '"\U000F09AB"'
+  - id: current_brightness
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # Per-light cached brightness (0–255; 0 = off)
+  - id: br0
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: br1
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: br2
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: br3
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: last_encoder_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: timer_running
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: timer_remaining
+    type: int
+    restore_value: no
+    initial_value: '0'
 
+font:
+  - file: "gfonts://Roboto"
+    id: roboto_18
+    size: 18
+    glyphsets: [GF_Latin_Kernel]
+  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf"
+    id: mdi_80
+    size: 80
+    glyphs:
+      - "\U000F09AB"  # mdi:toilet      → Bathroom
+      - "\U000F1B29"  # mdi:faucet      → Kitchen Small
+      - "\U000F065A"  # mdi:pot-steam   → Kitchen Big
+      - "\U000F0E51"  # mdi:monitor     → Desk
+      - "\U000F0AAF"  # mdi:egg          → Egg Timer
+      - "\U000F03F2"  # mdi:phone       → Find Phone
+  - file: "gfonts://Roboto"
+    id: roboto_dots
+    size: 10
+    glyphs: "● ○"
+
+# ──── HA brightness sensors ─────────────────────────────────────────────────
+# brightness attribute is 0-255; NaN when the light is off (stored as 0).
+# Duplicate this block for each additional light — keep entity_id, id, global
+# and the get_current_light if-block in sync.
 sensor:
+  - platform: homeassistant
+    entity_id: ${light0_entity}
+    attribute: brightness
+    id: ha_br0
+    on_value:
+      then:
+        - globals.set:
+            id: br0
+            value: !lambda |-
+              if (std::isnan(x)) return 0;
+              return (int)x;
+        - if:
+            condition: {lambda: return id(sel) == 0;}
+            then:
+              - globals.set:
+                  id: current_brightness
+                  value: !lambda |-
+                    if (std::isnan(x)) return 0;
+                    return (int)x;
+              - script.execute: update_display
+
+  - platform: homeassistant
+    entity_id: ${light1_entity}
+    attribute: brightness
+    id: ha_br1
+    on_value:
+      then:
+        - globals.set:
+            id: br1
+            value: !lambda |-
+              if (std::isnan(x)) return 0;
+              return (int)x;
+        - if:
+            condition: {lambda: return id(sel) == 1;}
+            then:
+              - globals.set:
+                  id: current_brightness
+                  value: !lambda |-
+                    if (std::isnan(x)) return 0;
+                    return (int)x;
+              - script.execute: update_display
+
+  - platform: homeassistant
+    entity_id: ${light2_entity}
+    attribute: brightness
+    id: ha_br2
+    on_value:
+      then:
+        - globals.set:
+            id: br2
+            value: !lambda |-
+              if (std::isnan(x)) return 0;
+              return (int)x;
+        - if:
+            condition: {lambda: return id(sel) == 2;}
+            then:
+              - globals.set:
+                  id: current_brightness
+                  value: !lambda |-
+                    if (std::isnan(x)) return 0;
+                    return (int)x;
+              - script.execute: update_display
+
+  - platform: homeassistant
+    entity_id: ${light3_entity}
+    attribute: brightness
+    id: ha_br3
+    on_value:
+      then:
+        - globals.set:
+            id: br3
+            value: !lambda |-
+              if (std::isnan(x)) return 0;
+              return (int)x;
+        - if:
+            condition: {lambda: return id(sel) == 3;}
+            then:
+              - globals.set:
+                  id: current_brightness
+                  value: !lambda |-
+                    if (std::isnan(x)) return 0;
+                    return (int)x;
+              - script.execute: update_display
+
   - platform: rotary_encoder
     name: "Rotary Encoder"
     id: rotaryencoder
     pin_a:
       number: GPIO40
-      mode:
-        input: true
-        pullup: true
+      mode: {input: true, pullup: true}
     pin_b:
       number: GPIO41
-      mode:
-        input: true
-        pullup: true
+      mode: {input: true, pullup: true}
     resolution: 1
     on_clockwise:
       then:
-        - logger.log: "Rotary Encoder Clockwise"
+        - lambda: |-
+            if ((millis() - id(last_encoder_ms)) < 80) return;
+            id(last_encoder_ms) = millis();
+            id(screentime).execute();
+            if (!id(dim_mode) || id(sel) >= ${num_lights}) {
+              id(sel) = (id(sel) + 1) % ${num_items};
+              id(get_current_light).execute();
+              id(update_display).execute();
+            } else {
+              id(brightness_up).execute();
+            }
     on_anticlockwise:
       then:
-        - logger.log: "Rotary Encoder Anticlockwise"
-  - platform: homeassistant
-    id: outdoor_temperature
-    entity_id: ${weather}
-    on_value:
-      then:
-        - lvgl.label.update:
-            id: temp_widget
-            text:
-              format: "%.1f°"
-              args: [ 'id(outdoor_temperature).get_state()' ]
-  - platform: homeassistant
-    id: media_player_volume
-    entity_id: ${mediaplayer}
-    attribute: volume_level
-    on_value:
-      - lvgl.arc.update:
-          id: volume_control_widget
-          value: !lambda return (x * 100);
-  - platform: template
-    id: pomodoro_timer
-    lambda: |-
-      if (id(pomodoro_timer_active).state) {
-        struct tm tm_finish{}, tm_now{};
-        time_t t_finish, t_now;
-        double remain;
-        /* parse ISO-8601 string from HA */
-        strptime(id(finishes_text).state.c_str(), "%Y-%m-%dT%T", &tm_finish);
-        t_finish = mktime(&tm_finish) + 3600;  // add 1h for local tz
-        /* current time from HA time component */
-        tm_now = id(ha_time).now().to_c_tm();
-        t_now    = mktime(&tm_now);
-        remain   = difftime(t_finish, t_now);
-        return remain > 0 ? (long)remain : 0;
-      }
-      return 0;
-    update_interval: 1s
-    unit_of_measurement: "s"
-    on_value:
-      then:
-        - lvgl.arc.update:
-            id: pomodoro_arc
-            value: !lambda >-
-              long total = id(pomodoro_duration_sec);
-              long rem   = id(pomodoro_timer).state;
-              return total ? (360 * rem) / total : 0;
-        - lvgl.label.update:
-            id: pomodoro_label
-            text: !lambda >-
-              int m = (id(pomodoro_timer).state) / 60;
-              return (m > 0 && id(pomodoro_timer_active).state) ? to_string(m) + "m" : "0m";
+        - lambda: |-
+            if ((millis() - id(last_encoder_ms)) < 80) return;
+            id(last_encoder_ms) = millis();
+            id(screentime).execute();
+            if (!id(dim_mode) || id(sel) >= ${num_lights}) {
+              id(sel) = (id(sel) + ${num_items} - 1) % ${num_items};
+              id(get_current_light).execute();
+              id(update_display).execute();
+            } else {
+              id(brightness_down).execute();
+            }
 
-text_sensor:
-  - platform: homeassistant
-    name: "Display Text"
-    entity_id: input_text.matrix_display_text
-    id: display_text
-  - platform: homeassistant
-    id: music_state
-    entity_id: ${mediaplayer}
-  - platform: homeassistant
-    id: track_name
-    entity_id: ${mediaplayer}
-    attribute: media_title
-    on_value:
-      then:
-        - lvgl.label.update:
-            id: track_name_widget
-            text: !lambda return id(track_name).state;
-  - platform: homeassistant
-    id: track_artist
-    entity_id: ${mediaplayer}
-    attribute: media_artist
-    on_value:
-      then:
-        - lvgl.label.update:
-            id: track_artist_widget
-            text: !lambda return id(track_artist).state;
-  - platform: homeassistant
-    id: track_album
-    entity_id: ${mediaplayer}
-    attribute: media_album_name
-    on_value:
-      then:
-        - lvgl.label.update:
-            id: track_album_widget
-            text: !lambda return id(track_album).state;
-  - platform: homeassistant
-    id: pomodoro_state
-    entity_id: timer.pomodoro
-  - platform: homeassistant
-    id: duration_text
-    entity_id: timer.pomodoro
-    attribute: duration
-    on_value:
-      then:
-        - lambda: id(pomodoro_duration_sec) = ::atol(id(duration_text).state.c_str());
-  - platform: homeassistant
-    id: finishes_text
-    entity_id: timer.pomodoro
-    attribute: finishes_at
-  - platform: homeassistant
-    id: pomodoro_color_text
-    entity_id: input_text.pomodoro_color
-    on_value:
-      then:
-        - lvgl.arc.update:
-            id: pomodoro_arc
-            arc_color: !lambda return lv_color_hex(strtol(id(pomodoro_color_text).state.c_str(), NULL, 16));
-
-font:
-  - file: "gfonts://Roboto"
-    id: roboto
-    size: 18
-    glyphsets:
-      - GF_Latin_Kernel
-
-time:
-  - platform: homeassistant
-    id: ha_time
-  - platform: sntp
-    timezone: "Europe/Warsaw"
-    id: esptime
-    on_time:
-      - cron: '1 * * * * *'     # every second
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO42
+      mode: {input: true, pullup: true}
+      inverted: true
+    id: dial_button
+    filters:
+      - delayed_on: 10ms
+    on_multi_click:
+      - timing:
+          - ON for 50ms to 500ms
+          - OFF for at least 50ms
         then:
-          - lvgl.label.update:
-              id: time_widget
-              text:
-                time_format: "%H:%m:%S"
-                time: esptime
-      - hours: 0
+          - lambda: |-
+              id(screentime).execute();
+              if (id(sel) < ${num_lights}) {
+                id(dim_mode) = !id(dim_mode);
+                id(update_display).execute();
+              } else if (id(sel) == ${num_lights}) {
+                id(start_egg_timer).execute();
+              } else {
+                id(ring_phone).execute();
+              }
+      - timing:
+          - ON for at least 700ms
         then:
-          - lvgl.label.update:
-              id: date_widget
-              text:
-                time_format: "%A %b %d"
-                time: esptime
+          - lambda: |-
+              id(screentime).execute();
+              if (id(sel) < ${num_lights}) {
+                id(toggle_light).execute();
+              }
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (!id(timer_running)) return;
+          id(timer_remaining) = id(timer_remaining) - 1;
+          if (id(timer_remaining) <= 0) {
+            id(timer_running) = false;
+            id(timer_remaining) = 0;
+            id(timer_beep).execute();
+          }
+          if (id(sel) == ${num_lights}) {
+            id(update_display).execute();
+          }
 
 script:
   - id: screentime
@@ -286,10 +378,214 @@ script:
       - light.turn_on: back_light
       - delay: ${screensaver}
       - light.turn_off: back_light
-  - id: screenoff
+
+  # Updates current_entity, current_name, current_brightness from sel.
+  # Add one if-block here for each additional light.
+  - id: get_current_light
+    mode: single
     then:
-      - script.stop: screentime
-      - light.turn_off: back_light
+      - if:
+          condition: {lambda: return id(sel) == 0;}
+          then:
+            - globals.set:
+                id: current_entity
+                value: !lambda return "${light0_entity}";
+            - globals.set:
+                id: current_name
+                value: !lambda return "${light0_name}";
+            - globals.set:
+                id: current_icon
+                value: !lambda return "\U000F09AB";  # toilet
+            - globals.set:
+                id: current_brightness
+                value: !lambda return id(br0);
+      - if:
+          condition: {lambda: return id(sel) == 1;}
+          then:
+            - globals.set:
+                id: current_entity
+                value: !lambda return "${light1_entity}";
+            - globals.set:
+                id: current_name
+                value: !lambda return "${light1_name}";
+            - globals.set:
+                id: current_icon
+                value: !lambda return "\U000F1B29";  # faucet
+            - globals.set:
+                id: current_brightness
+                value: !lambda return id(br1);
+      - if:
+          condition: {lambda: return id(sel) == 2;}
+          then:
+            - globals.set:
+                id: current_entity
+                value: !lambda return "${light2_entity}";
+            - globals.set:
+                id: current_name
+                value: !lambda return "${light2_name}";
+            - globals.set:
+                id: current_icon
+                value: !lambda return "\U000F065A";  # pot-steam
+            - globals.set:
+                id: current_brightness
+                value: !lambda return id(br2);
+      - if:
+          condition: {lambda: return id(sel) == 3;}
+          then:
+            - globals.set:
+                id: current_entity
+                value: !lambda return "${light3_entity}";
+            - globals.set:
+                id: current_name
+                value: !lambda return "${light3_name}";
+            - globals.set:
+                id: current_icon
+                value: !lambda return "\U000F0E51";  # monitor
+            - globals.set:
+                id: current_brightness
+                value: !lambda return id(br3);
+      - if:
+          condition:
+            lambda: return id(sel) == ${num_lights};
+          then:
+            - globals.set:
+                id: current_entity
+                value: !lambda return std::string("");
+            - globals.set:
+                id: current_name
+                value: !lambda return std::string("Egg Timer");
+            - globals.set:
+                id: current_icon
+                value: !lambda return std::string("\U000F0AAF");
+            - globals.set:
+                id: current_brightness
+                value: !lambda return 0;
+      - if:
+          condition:
+            lambda: return id(sel) == ${num_lights} + 1;
+          then:
+            - globals.set:
+                id: current_entity
+                value: !lambda return std::string("");
+            - globals.set:
+                id: current_name
+                value: !lambda return std::string("Find Phone");
+            - globals.set:
+                id: current_icon
+                value: !lambda return std::string("\U000F03F2");
+            - globals.set:
+                id: current_brightness
+                value: !lambda return 0;
+
+  - id: update_display
+    mode: single
+    then:
+      # SELECT: colored bg + white icon. DIM: gray bg (brightness) + room-colored icon.
+      - lvgl.widget.update:
+          id: bg
+          bg_color: !lambda |-
+            if (!id(dim_mode) || id(sel) >= ${num_lights}) {
+              static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644};
+              return lv_color_hex(c[id(sel)]);
+            }
+            uint8_t v = (uint8_t)id(current_brightness);
+            return lv_color_make(v, v, v);
+      - lvgl.label.update:
+          id: lbl_icon
+          text: !lambda return id(current_icon);
+          text_color: !lambda |-
+            if (!id(dim_mode) || id(sel) >= ${num_lights}) return lv_color_hex(0xFFFFFF);
+            static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644};
+            return lv_color_hex(c[id(sel)]);
+      # Dot row: white in SELECT, room color in DIM
+      - lvgl.label.update:
+          id: lbl_dots
+          text: !lambda |-
+            std::string s;
+            for (int i = 0; i < ${num_items}; i++) {
+              if (i > 0) s += " ";
+              s += (i == id(sel)) ? "●" : "○";
+            }
+            return s;
+          text_color: !lambda |-
+            if (!id(dim_mode) || id(sel) >= ${num_lights}) return lv_color_hex(0xFFFFFF);
+            static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644};
+            return lv_color_hex(c[id(sel)]);
+      - lvgl.label.update:
+          id: lbl_timer
+          text: !lambda |-
+            if (id(sel) == ${num_lights} && id(timer_running)) {
+              int t = id(timer_remaining);
+              char buf[8];
+              snprintf(buf, sizeof(buf), "%d:%02d", t / 60, t % 60);
+              return std::string(buf);
+            }
+            return std::string("");
+
+  # Rotating up when light is off turns it on at default/last brightness.
+  - id: brightness_up
+    mode: queued
+    then:
+      - homeassistant.action:
+          action: light.turn_on
+          data:
+            entity_id: !lambda return id(current_entity);
+            brightness_pct: !lambda |-
+              int pct = (id(current_brightness) * 100 / 255) + 10;
+              return std::to_string(pct > 100 ? 100 : pct);
+
+  - id: brightness_down
+    mode: queued
+    then:
+      - homeassistant.action:
+          action: light.turn_on
+          data:
+            entity_id: !lambda return id(current_entity);
+            brightness_pct: !lambda |-
+              int pct = (id(current_brightness) * 100 / 255) - 10;
+              return std::to_string(pct < 1 ? 1 : pct);
+
+  - id: toggle_light
+    mode: single
+    then:
+      - homeassistant.action:
+          action: light.toggle
+          data:
+            entity_id: !lambda return id(current_entity);
+
+  # Short press on egg timer slot starts/restarts the countdown.
+  - id: start_egg_timer
+    mode: restart
+    then:
+      - globals.set:
+          id: timer_running
+          value: 'true'
+      - globals.set:
+          id: timer_remaining
+          value: '395'  # 6 min 35 sec
+      - script.execute: update_display
+
+  - id: ring_phone
+    mode: single
+    then:
+      - homeassistant.action:
+          action: button.press
+          data:
+            entity_id: "${phone_ring_entity}"
+
+  - id: timer_beep
+    mode: single
+    then:
+      - rtttl.play: !lambda |-
+          static const char* tunes[] = {
+            "children:d=16,o=5,b=200:4f7,1p,4g#7,8g7,4d#7,1p,4g#7,8g7,4c7,1p,4g#7,8g7,4g#6,1p,f6,g6,g#6,c7,4f7,1p",
+            "Smurfs:d=32,o=5,b=200:4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8f#,p,8a#,p,4g#,4p,g#,p,a#,p,b,p,c6,p,4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8b,p,8f,p,4f#",
+            "TakeOnMe:d=4,o=4,b=160:8f#5,8f#5,8f#5,8d5,8p,8b,8p,8e5,8p,8e5,8p,8e5,8g#5,8g#5,8a5,8b5,8a5,8a5,8a5,8e5,8p,8d5,8p,8f#5,8p,8f#5,8p,8f#5,8e5,8e5,8f#5,8e5,8f#5,8f#5,8f#5,8d5,8p,8b,8p,8e5,8p,8e5,8p,8e5,8g#5,8g#5,8a5,8b5,8a5,8a5,8a5,8e5,8p,8d5,8p,8f#5,8p,8f#5,8p,8f#5,8e5,8e5",
+            "Muminki:d=8,o=5,b=112:16e,16d,16c,16d,e,a4,16f,16e,16d,16e,f,b4,16a,16g,16f,16g,e,d,e,a,b,16a,16g,16f,16g,e,d,c,d,e",
+            "Gadget:d=16,o=5,b=50:32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,32d#,32f,32f#,32g#,a#,d#6,4d6,32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,8d#",
+            "MahnaMahna:d=16,o=6,b=125:c#,c.,b5,8a#.5,8f.,4g#,a#,g.,4d#,8p,c#,c.,b5,8a#.5,8f.,g#.,8a#.,4g,8p,c#,c.,b5,8a#.5,8f.,4g#,f,g.,8d#.,f,g.,8d#.,f,8g,8d#.,f,8g,d#,8c,a#5,8d#.,8d#.,4d#,8d#."
+          };
+          return std::string(tunes[rand() % 6]);
 
 lvgl:
   buffer_size: 25%
@@ -297,108 +593,42 @@ lvgl:
     - watchface
   theme:
     label:
-      text_font: montserrat_18
       text_color: 0xFFFFFF
-  top_layer:
-    widgets:
-      - label:
-          id: time_widget
-          align: CENTER
-          y: 95
-          text:
-            time_format: "%H:%m:%S"
-            time: esptime
-          on_short_click:
-            then:
-              - script.execute: screenoff
-      - label:
-          id: date_widget
-          align: CENTER
-          y: 80
-          text:
-            time_format: "%A %b %d"
-            time: esptime
-          on_short_click:
-            then:
-              - script.execute: screenoff
   pages:
-    - id: time_page
+    - id: main_page
       bg_color: 0x000000
       widgets:
+        # Full-screen background — color drives both SELECT (room colour) and DIM (brightness)
+        - obj:
+            id: bg
+            width: 240
+            height: 240
+            align: CENTER
+            bg_color: 0x005599
+            border_width: 0
+            radius: 0
+            pad_all: 0
+        # Large room icon centred on screen
         - label:
+            id: lbl_icon
             align: CENTER
-            id: temp_widget
-            y: -100
-            text:
-              format: "%.1f°"
-              args: [ 'id(outdoor_temperature).get_state()' ]
-    - id: media_player_page
-      bg_color: 0x000000
-      widgets:
+            y: -10
+            text: "\U000F09AB"
+            text_font: mdi_80
+            text_color: 0xFFFFFF
+        # Egg timer countdown (visible only when timer is running and egg timer is selected)
         - label:
-            id: track_name_widget
-            text_font: roboto
+            id: lbl_timer
             align: CENTER
-            max_width: 80%
-            width: 80%
-            text_align: CENTER
-            long_mode: DOT
-            y: -25
+            y: 55
+            text: ""
+            text_font: roboto_18
+            text_color: 0xFFFFFF
+        # Light-selection dots (● current, ○ others) near bottom
         - label:
-            id: track_artist_widget
-            text_font: roboto
+            id: lbl_dots
             align: CENTER
-            max_width: 90%
-            width: 90%
-            text_align: CENTER
-            long_mode: DOT
-            y: 0
-        - label:
-            id: track_album_widget
-            text_font: roboto
-            align: CENTER
-            max_width: 80%
-            width: 80%
-            text_align: CENTER
-            long_mode: DOT
-            y: 25
-        - arc:
-            id: volume_control_widget
-            adv_hittest: true
-            align: CENTER
-            width: 90%
-            height: 90%
-            adjustable: true
-            on_release:
-              - homeassistant.action:
-                  action: media_player.volume_set
-                  data:
-                    entity_id: ${mediaplayer}
-                    volume_level: !lambda return (x / 100);
-    - id: pomodoro_page
-      bg_color: 0x000000
-      widgets:
-        - arc:
-            id: pomodoro_arc
-            align: CENTER
-            width: 150
-            height: 150
-            start_angle: 0
-            end_angle: 360
-            rotation: 90
-            radius: 60
-            line_width: 0             # fill circle, not outline
-            adjustable: false
-            arc_color: 0xFF0000      # overwritten immediately by HA colour update
-            value: 0                  # updated dynamically
-        - label:
-            id: pomodoro_label
-            align: CENTER
-            y: 30
-            text: "0m"
-
-globals:
-  - id: pomodoro_duration_sec
-    type: int
-    restore_value: no
-    initial_value: '3600'
+            y: 80
+            text: "● ○ ○ ○ ○ ○"
+            text_font: roboto_dots
+            text_color: 0xFFFFFF
