@@ -97,6 +97,10 @@ touchscreen:
     on_touch:
       then:
         - lambda: |-
+            if (id(canary_visible)) {
+              id(dismiss_canary).execute();
+              return;
+            }
             if (id(sel) == ${num_lights}) {
               id(timer_beep).execute();
             } else if (id(dim_mode) && id(sel) < ${num_lights}) {
@@ -178,6 +182,26 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
+  - id: blink_entity
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: blink_brightness
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: canary_visible
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: air_co2
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: air_hcho
+    type: float
+    restore_value: no
+    initial_value: '0.0'
 
 font:
   - file: "gfonts://Roboto"
@@ -194,6 +218,8 @@ font:
       - "\U000F0E51"  # mdi:monitor     → Desk
       - "\U000F0AAF"  # mdi:egg          → Egg Timer
       - "\U000F03F2"  # mdi:phone       → Find Phone
+      - "\U000F15C6"  # mdi:bird        → Canary alive
+      - "\U000F0C6E"  # mdi:emoticon-dead → Canary dead
   - file: "gfonts://Roboto"
     id: roboto_dots
     size: 10
@@ -288,6 +314,32 @@ sensor:
                     return (int)x;
               - script.execute: update_display
 
+  - platform: homeassistant
+    entity_id: sensor.mt15_mt29_carbon_dioxide
+    id: ha_co2
+    on_value:
+      then:
+        - globals.set:
+            id: air_co2
+            value: !lambda return x;
+        - if:
+            condition: {lambda: return id(canary_visible);}
+            then:
+              - script.execute: update_canary_display
+
+  - platform: homeassistant
+    entity_id: sensor.mt15_mt29_formaldehyde
+    id: ha_hcho
+    on_value:
+      then:
+        - globals.set:
+            id: air_hcho
+            value: !lambda return x;
+        - if:
+            condition: {lambda: return id(canary_visible);}
+            then:
+              - script.execute: update_canary_display
+
   - platform: rotary_encoder
     name: "Rotary Encoder"
     id: rotaryencoder
@@ -301,26 +353,38 @@ sensor:
     on_clockwise:
       then:
         - lambda: |-
+            if (id(canary_visible)) {
+              id(dismiss_canary).execute();
+              return;
+            }
             if ((millis() - id(last_encoder_ms)) < 80) return;
             id(last_encoder_ms) = millis();
             id(screentime).execute();
             if (!id(dim_mode) || id(sel) >= ${num_lights}) {
+              if (id(sel) < ${num_lights}) id(restore_blink_light).execute();
               id(sel) = (id(sel) + 1) % ${num_items};
               id(get_current_light).execute();
               id(update_display).execute();
+              if (id(sel) < ${num_lights}) id(select_blink).execute();
             } else {
               id(brightness_up).execute();
             }
     on_anticlockwise:
       then:
         - lambda: |-
+            if (id(canary_visible)) {
+              id(dismiss_canary).execute();
+              return;
+            }
             if ((millis() - id(last_encoder_ms)) < 80) return;
             id(last_encoder_ms) = millis();
             id(screentime).execute();
             if (!id(dim_mode) || id(sel) >= ${num_lights}) {
+              if (id(sel) < ${num_lights}) id(restore_blink_light).execute();
               id(sel) = (id(sel) + ${num_items} - 1) % ${num_items};
               id(get_current_light).execute();
               id(update_display).execute();
+              if (id(sel) < ${num_lights}) id(select_blink).execute();
             } else {
               id(brightness_down).execute();
             }
@@ -340,8 +404,16 @@ binary_sensor:
           - OFF for at least 50ms
         then:
           - lambda: |-
+              if (id(canary_visible)) {
+                id(dismiss_canary).execute();
+                return;
+              }
               id(screentime).execute();
               if (id(sel) < ${num_lights}) {
+                if (!id(dim_mode)) {
+                  id(restore_blink_light).execute();
+                  id(blink_entity) = std::string("");
+                }
                 id(dim_mode) = !id(dim_mode);
                 id(update_display).execute();
               } else if (id(sel) == ${num_lights}) {
@@ -353,6 +425,10 @@ binary_sensor:
           - ON for at least 700ms
         then:
           - lambda: |-
+              if (id(canary_visible)) {
+                id(dismiss_canary).execute();
+                return;
+              }
               id(screentime).execute();
               if (id(sel) < ${num_lights}) {
                 id(toggle_light).execute();
@@ -378,8 +454,45 @@ script:
     mode: restart
     then:
       - light.turn_on: back_light
+      - lvgl.page.show: main_page
       - delay: ${screensaver}
-      - light.turn_off: back_light
+      - script.execute: show_canary
+
+  - id: show_canary
+    mode: single
+    then:
+      - globals.set:
+          id: canary_visible
+          value: 'true'
+      - script.execute: update_canary_display
+      - lvgl.page.show: canary_page
+
+  - id: dismiss_canary
+    mode: single
+    then:
+      - globals.set:
+          id: canary_visible
+          value: 'false'
+      - lvgl.page.show: main_page
+      - script.execute: update_display
+      - script.execute: screentime
+
+  - id: update_canary_display
+    mode: single
+    then:
+      - lambda: |-
+          bool bad = (id(air_co2) >= 1500.0f) || (id(air_hcho) >= 0.3f);
+          lv_obj_set_style_bg_color(id(canary_bg),
+            bad ? lv_color_hex(0x550000) : lv_color_hex(0x1A3300), LV_PART_MAIN);
+          lv_label_set_text(id(canary_icon_lbl),
+            bad ? "\U000F0C6E" : "\U000F15C6");
+          lv_obj_set_style_text_color(id(canary_icon_lbl),
+            bad ? lv_color_hex(0xFF3333) : lv_color_hex(0xFFDD00), LV_PART_MAIN);
+          lv_label_set_text(id(canary_status_lbl),
+            bad ? "Bad Air!" : "Air OK");
+          lv_obj_set_style_text_color(id(canary_status_lbl),
+            bad ? lv_color_hex(0xFF8888) : lv_color_hex(0x88FF88), LV_PART_MAIN);
+          lv_obj_invalidate(id(canary_bg));
 
   # Updates current_entity, current_name, current_brightness from sel.
   # Add one if-block here for each additional light.
@@ -529,24 +642,110 @@ script:
   - id: brightness_up
     mode: queued
     then:
-      - homeassistant.action:
-          action: light.turn_on
-          data:
-            entity_id: !lambda return id(current_entity);
-            brightness_pct: !lambda |-
-              int pct = (id(current_brightness) * 100 / 255) + 10;
-              return std::to_string(pct > 100 ? 100 : pct);
+      - if:
+          condition:
+            lambda: return (id(current_brightness) * 100 / 255) + 10 > 100;
+          then:
+            - homeassistant.action:
+                action: light.turn_off
+                data:
+                  entity_id: !lambda return id(current_entity);
+          else:
+            - homeassistant.action:
+                action: light.turn_on
+                data:
+                  entity_id: !lambda return id(current_entity);
+                  brightness_pct: !lambda |-
+                    return std::to_string((id(current_brightness) * 100 / 255) + 10);
 
   - id: brightness_down
     mode: queued
     then:
-      - homeassistant.action:
-          action: light.turn_on
-          data:
-            entity_id: !lambda return id(current_entity);
-            brightness_pct: !lambda |-
-              int pct = (id(current_brightness) * 100 / 255) - 10;
-              return std::to_string(pct < 1 ? 1 : pct);
+      - if:
+          condition:
+            lambda: return (id(current_brightness) * 100 / 255) - 10 < 1;
+          then:
+            - homeassistant.action:
+                action: light.turn_on
+                data:
+                  entity_id: !lambda return id(current_entity);
+                  brightness_pct: "100"
+          else:
+            - homeassistant.action:
+                action: light.turn_on
+                data:
+                  entity_id: !lambda return id(current_entity);
+                  brightness_pct: !lambda |-
+                    return std::to_string((id(current_brightness) * 100 / 255) - 10);
+
+  - id: select_blink
+    mode: restart
+    then:
+      - globals.set:
+          id: blink_entity
+          value: !lambda return id(current_entity);
+      - globals.set:
+          id: blink_brightness
+          value: !lambda return id(current_brightness);
+      - repeat:
+          count: 4
+          then:
+            - homeassistant.action:
+                action: light.turn_on
+                data:
+                  entity_id: !lambda return id(blink_entity);
+                  brightness_pct: "70"
+                  transition: "1.0"
+            - delay: 1200ms
+            - homeassistant.action:
+                action: light.turn_on
+                data:
+                  entity_id: !lambda return id(blink_entity);
+                  brightness_pct: "20"
+                  transition: "1.0"
+            - delay: 1200ms
+      - if:
+          condition:
+            lambda: return id(blink_brightness) == 0;
+          then:
+            - homeassistant.action:
+                action: light.turn_off
+                data:
+                  entity_id: !lambda return id(blink_entity);
+          else:
+            - homeassistant.action:
+                action: light.turn_on
+                data:
+                  entity_id: !lambda return id(blink_entity);
+                  brightness_pct: !lambda |-
+                    int pct = id(blink_brightness) * 100 / 255;
+                    return std::to_string(pct < 1 ? 1 : pct);
+                  transition: "1.0"
+
+  - id: restore_blink_light
+    mode: single
+    then:
+      - script.stop: select_blink
+      - if:
+          condition:
+            lambda: return !id(blink_entity).empty();
+          then:
+            - if:
+                condition:
+                  lambda: return id(blink_brightness) == 0;
+                then:
+                  - homeassistant.action:
+                      action: light.turn_off
+                      data:
+                        entity_id: !lambda return id(blink_entity);
+                else:
+                  - homeassistant.action:
+                      action: light.turn_on
+                      data:
+                        entity_id: !lambda return id(blink_entity);
+                        brightness_pct: !lambda |-
+                          int pct = id(blink_brightness) * 100 / 255;
+                          return std::to_string(pct < 1 ? 1 : pct);
 
   - id: toggle_light
     mode: single
@@ -583,11 +782,26 @@ script:
           static const char* tunes[] = {
             "children:d=16,o=5,b=200:4f7,1p,4g#7,8g7,4d#7,1p,4g#7,8g7,4c7,1p,4g#7,8g7,4g#6,1p,f6,g6,g#6,c7,4f7,1p",
             "Smurfs:d=32,o=5,b=200:4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8f#,p,8a#,p,4g#,4p,g#,p,a#,p,b,p,c6,p,4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8b,p,8f,p,4f#",
-            "TakeOnMe:d=4,o=4,b=160:8f#5,8f#5,8f#5,8d5,8p,8b,8p,8e5,8p,8e5,8p,8e5,8g#5,8g#5,8a5,8b5,8a5,8a5,8a5,8e5,8p,8d5,8p,8f#5,8p,8f#5,8p,8f#5,8e5,8e5,8f#5,8e5,8f#5,8f#5,8f#5,8d5,8p,8b,8p,8e5,8p,8e5,8p,8e5,8g#5,8g#5,8a5,8b5,8a5,8a5,8a5,8e5,8p,8d5,8p,8f#5,8p,8f#5,8p,8f#5,8e5,8e5",
             "Gadget:d=16,o=5,b=50:32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,32d#,32f,32f#,32g#,a#,d#6,4d6,32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,8d#",
-            "NeverGonna:d=4,o=5,b=200:8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,d6,8p,d6,8p,c6,8b,a.,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6.,p,8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,2g6,b,c6.,8b,a,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6."
+            "NeverGonna:d=4,o=5,b=200:8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,d6,8p,d6,8p,c6,8b,a.,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6.,p,8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,2g6,b,c6.,8b,a,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6.",
+            "HarryPot:d=8,o=6,b=125:b5,e.,16g,f#,4e,b,4a.,4f#.,e.,16g,f#,4d,f,2b5,p,b5,e.,16g,f#,4e,b,4d7,c#7,4c7,g#,c.7,16b,a#,4f#,g,2e,p,g,4b,g,4b,g,4c7,b,4a#,f#,g.,16b,a#,4a#5,b5,2b"
           };
           return std::string(tunes[rand() % 5]);
+
+text:
+  - platform: template
+    name: "RTTTL Song"
+    id: rtttl_song
+    mode: text
+    optimistic: true
+    initial_value: ""
+
+button:
+  - platform: template
+    name: "Play RTTTL"
+    on_press:
+      then:
+        - rtttl.play: !lambda 'return id(rtttl_song).state;'
 
 lvgl:
   buffer_size: 50%
@@ -634,3 +848,29 @@ lvgl:
             text: "● ○ ○ ○ ○ ○"
             text_font: roboto_dots
             text_color: 0xFFFFFF
+    - id: canary_page
+      bg_color: 0x000000
+      widgets:
+        - obj:
+            id: canary_bg
+            width: 240
+            height: 240
+            align: CENTER
+            bg_color: 0x1A3300
+            border_width: 0
+            radius: 0
+            pad_all: 0
+        - label:
+            id: canary_icon_lbl
+            align: CENTER
+            y: -20
+            text: "\U000F15C6"
+            text_font: mdi_80
+            text_color: 0xFFDD00
+        - label:
+            id: canary_status_lbl
+            align: CENTER
+            y: 60
+            text: "Air OK"
+            text_font: roboto_18
+            text_color: 0x88FF88
