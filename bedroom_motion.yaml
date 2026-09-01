@@ -103,11 +103,13 @@ number:
     max_still_distance_gate:
       name: "Max Still Distance Gate"
 
-switch:
-  - platform: ld2410
-    ld2410_id: radar
-    bluetooth:
-      name: "Radar Bluetooth"
+# Radar's built-in BLE — only needed for phone-app setup/calibration. Disabled
+# to drop the always-on RF radio and its open reconfiguration surface.
+# switch:
+#   - platform: ld2410
+#     ld2410_id: radar
+#     bluetooth:
+#       name: "Radar Bluetooth"
 
 button:
   - platform: ld2410
