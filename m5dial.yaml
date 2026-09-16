@@ -16,9 +16,34 @@ substitutions:
   light3_entity: "light.desk_light_desk_light"
   light3_name:   "Desk"
   # ──── Action items ──────────────────────────────────────────────────────────
-  # num_items = num_lights + number of action slots (egg timer + find phone = 2)
-  num_items: "6"
+  # num_items = num_lights + number of action slots (egg timer + find phone + cleaning + settings = 4)
+  num_items: "8"
   phone_ring_entity: "button.fmd_rafa_volume_ring_device"
+  # ──── Cleaning (Juanita) ────────────────────────────────────────────────────
+  # Calls vacuum.juanita (Roborock) directly — vacuum.start for the whole flat,
+  # vacuum.send_command (app_segment_clean) with a hardcoded segment id per room.
+  # Segment ids come from `roborock.get_maps` on vacuum.juanita and only change
+  # if the flat is remapped.
+  vacuum_entity: "vacuum.juanita"
+  num_clean_rooms: "7"
+  clean_room0_name: "Corridor"
+  clean_room0_id: "16"
+  clean_room1_name: "Bathroom"
+  clean_room1_id: "17"
+  clean_room2_name: "Bedroom"
+  clean_room2_id: "19"
+  clean_room3_name: "Rafas office"
+  clean_room3_id: "18"
+  clean_room4_name: "Carpet"
+  clean_room4_id: "22"
+  clean_room5_name: "Kitchen"
+  clean_room5_id: "24"
+  clean_room6_name: "Jadalnia"
+  clean_room6_id: "23"
+  # ──── Controller presence (BLE) ─────────────────────────────────────────────
+  # HA watches these binary sensors and fires the bazzite Wake-on-LAN automation.
+  xbox_controller_mac: "68:6C:E6:7A:DE:F4"
+  steam_controller_mac: "EE:DD:40:6E:76:FC"
   # ────────────────────────────────────────────────────────────────────────────
   sdapin: GPIO11
   sclpin: GPIO12
@@ -49,6 +74,7 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   fast_connect: true
+  reboot_timeout: 15min
   ap:
     ssid: "${friendly_name} Fallback"
     password: !secret wifi_password
@@ -65,6 +91,12 @@ api:
 ota:
   platform: esphome
   password: !secret ota_password
+
+# Passive scan: just listen for the controllers' advertisements, never respond
+# (active: false avoids answering scan requests / interfering with pairing).
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
 
 i2c:
   - id: bus_internal
@@ -202,6 +234,26 @@ globals:
     type: float
     restore_value: no
     initial_value: '0.0'
+  - id: in_cleaning_menu
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: in_settings
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: clean_sel
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: current_clean_display
+    type: std::string
+    restore_value: no
+    initial_value: '"Whole Flat"'
+  - id: current_clean_icon
+    type: std::string
+    restore_value: no
+    initial_value: '"\U000F104D"'
 
 font:
   - file: "gfonts://Roboto"
@@ -220,6 +272,17 @@ font:
       - "\U000F03F2"  # mdi:phone       → Find Phone
       - "\U000F15C6"  # mdi:bird        → Canary alive
       - "\U000F0C6E"  # mdi:emoticon-dead → Canary dead
+      - "\U000F00E2"  # mdi:broom               → Cleaning (main menu)
+      - "\U000F104D"  # mdi:home-circle-outline → Whole Flat
+      - "\U000F0CDD"  # mdi:arrow-left-circle   → Back
+      - "\U000F0B47"  # mdi:shoe-formal         → Corridor
+      - "\U000F08A0"  # mdi:bed-empty           → Bedroom
+      - "\U000F0AAB"  # mdi:desktop-tower-monitor → Rafas office
+      - "\U000F1475"  # mdi:rug                 → Carpet
+      - "\U000F028F"  # mdi:fridge-outline      → Kitchen
+      - "\U000F1061"  # mdi:table-chair         → Jadalnia
+      - "\U000F0493"  # mdi:cog                 → Settings
+      - "\U000F05A9"  # mdi:wifi                → WiFi info
   - file: "gfonts://Roboto"
     id: roboto_dots
     size: 10
@@ -360,6 +423,13 @@ sensor:
             if ((millis() - id(last_encoder_ms)) < 80) return;
             id(last_encoder_ms) = millis();
             id(screentime).execute();
+            if (id(in_settings)) return;
+            if (id(in_cleaning_menu)) {
+              id(clean_sel) = (id(clean_sel) + 1) % (${num_clean_rooms} + 2);
+              id(get_current_clean_room).execute();
+              id(update_cleaning_display).execute();
+              return;
+            }
             if (!id(dim_mode) || id(sel) >= ${num_lights}) {
               if (id(sel) < ${num_lights}) id(restore_blink_light).execute();
               id(sel) = (id(sel) + 1) % ${num_items};
@@ -379,6 +449,13 @@ sensor:
             if ((millis() - id(last_encoder_ms)) < 80) return;
             id(last_encoder_ms) = millis();
             id(screentime).execute();
+            if (id(in_settings)) return;
+            if (id(in_cleaning_menu)) {
+              id(clean_sel) = (id(clean_sel) + (${num_clean_rooms} + 2) - 1) % (${num_clean_rooms} + 2);
+              id(get_current_clean_room).execute();
+              id(update_cleaning_display).execute();
+              return;
+            }
             if (!id(dim_mode) || id(sel) >= ${num_lights}) {
               if (id(sel) < ${num_lights}) id(restore_blink_light).execute();
               id(sel) = (id(sel) + ${num_items} - 1) % ${num_items};
@@ -390,6 +467,23 @@ sensor:
             }
 
 binary_sensor:
+  # On while the controller is advertising, off after `timeout` of silence.
+  # Controllers advertise in bursts with gaps, so hold "on" for 2 min after the
+  # last sighting; HA then only sees one off->on per real arrival.
+  - platform: ble_presence
+    mac_address: ${xbox_controller_mac}
+    name: "Xbox Controller Nearby"
+    timeout: 15s
+    filters:
+      - delayed_off: 2min
+
+  - platform: ble_presence
+    mac_address: ${steam_controller_mac}
+    name: "Steam Controller Nearby"
+    timeout: 15s
+    filters:
+      - delayed_off: 2min
+
   - platform: gpio
     pin:
       number: GPIO42
@@ -409,6 +503,18 @@ binary_sensor:
                 return;
               }
               id(screentime).execute();
+              if (id(in_settings)) {
+                id(exit_settings).execute();
+                return;
+              }
+              if (id(in_cleaning_menu)) {
+                if (id(clean_sel) == ${num_clean_rooms} + 1) {
+                  id(exit_cleaning_menu).execute();
+                } else {
+                  id(start_clean).execute();
+                }
+                return;
+              }
               if (id(sel) < ${num_lights}) {
                 if (!id(dim_mode)) {
                   id(restore_blink_light).execute();
@@ -418,8 +524,12 @@ binary_sensor:
                 id(update_display).execute();
               } else if (id(sel) == ${num_lights}) {
                 id(start_egg_timer).execute();
-              } else {
+              } else if (id(sel) == ${num_lights} + 1) {
                 id(ring_phone).execute();
+              } else if (id(sel) == ${num_lights} + 2) {
+                id(enter_cleaning_menu).execute();
+              } else {
+                id(enter_settings).execute();
               }
       - timing:
           - ON for at least 700ms
@@ -454,7 +564,17 @@ script:
     mode: restart
     then:
       - light.turn_on: back_light
-      - lvgl.page.show: main_page
+      - if:
+          condition: {lambda: return id(in_cleaning_menu);}
+          then:
+            - lvgl.page.show: cleaning_page
+          else:
+            - if:
+                condition: {lambda: return id(in_settings);}
+                then:
+                  - lvgl.page.show: settings_page
+                else:
+                  - lvgl.page.show: main_page
       - delay: ${screensaver}
       - script.execute: show_canary
 
@@ -473,6 +593,9 @@ script:
       - globals.set:
           id: canary_visible
           value: 'false'
+      - globals.set:
+          id: in_cleaning_menu
+          value: 'false'
       - lvgl.page.show: main_page
       - script.execute: update_display
       - script.execute: screentime
@@ -481,7 +604,9 @@ script:
     mode: single
     then:
       - lambda: |-
-          bool bad = (id(air_co2) >= 1500.0f) || (id(air_hcho) >= 0.3f);
+          bool co2_high = id(air_co2) >= 1500.0f;
+          bool hcho_high = id(air_hcho) >= 0.3f;
+          bool bad = co2_high || hcho_high;
           lv_obj_set_style_bg_color(id(canary_bg),
             bad ? lv_color_hex(0x550000) : lv_color_hex(0x1A3300), LV_PART_MAIN);
           lv_label_set_text(id(canary_icon_lbl),
@@ -492,6 +617,15 @@ script:
             bad ? "Bad Air!" : "Air OK");
           lv_obj_set_style_text_color(id(canary_status_lbl),
             bad ? lv_color_hex(0xFF8888) : lv_color_hex(0x88FF88), LV_PART_MAIN);
+          std::string reason;
+          if (co2_high && hcho_high) {
+            reason = "CO2 & HCHO high";
+          } else if (co2_high) {
+            reason = "CO2 high";
+          } else if (hcho_high) {
+            reason = "HCHO high";
+          }
+          lv_label_set_text(id(canary_reason_lbl), reason.c_str());
           lv_obj_invalidate(id(canary_bg));
 
   # Updates current_entity, current_name, current_brightness from sel.
@@ -591,6 +725,286 @@ script:
             - globals.set:
                 id: current_brightness
                 value: !lambda return 0;
+      - if:
+          condition:
+            lambda: return id(sel) == ${num_lights} + 2;
+          then:
+            - globals.set:
+                id: current_entity
+                value: !lambda return std::string("");
+            - globals.set:
+                id: current_name
+                value: !lambda return std::string("Cleaning");
+            - globals.set:
+                id: current_icon
+                value: !lambda return std::string("\U000F00E2");
+            - globals.set:
+                id: current_brightness
+                value: !lambda return 0;
+      - if:
+          condition:
+            lambda: return id(sel) == ${num_lights} + 3;
+          then:
+            - globals.set:
+                id: current_entity
+                value: !lambda return std::string("");
+            - globals.set:
+                id: current_name
+                value: !lambda return std::string("Settings");
+            - globals.set:
+                id: current_icon
+                value: !lambda return std::string("\U000F0493");
+            - globals.set:
+                id: current_brightness
+                value: !lambda return 0;
+
+  # Updates current_clean_display, current_clean_icon from clean_sel.
+  # 0 = Whole Flat, 1..num_clean_rooms = individual rooms, last slot = Back.
+  - id: get_current_clean_room
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 0;
+          then:
+            - globals.set:
+                id: current_clean_display
+                value: !lambda return std::string("Whole Flat");
+            - globals.set:
+                id: current_clean_icon
+                value: !lambda return std::string("\U000F104D");
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 1;
+          then:
+            - globals.set:
+                id: current_clean_display
+                value: !lambda return "${clean_room0_name}";
+            - globals.set:
+                id: current_clean_icon
+                value: !lambda return std::string("\U000F0B47");
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 2;
+          then:
+            - globals.set:
+                id: current_clean_display
+                value: !lambda return "${clean_room1_name}";
+            - globals.set:
+                id: current_clean_icon
+                value: !lambda return std::string("\U000F09AB");
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 3;
+          then:
+            - globals.set:
+                id: current_clean_display
+                value: !lambda return "${clean_room2_name}";
+            - globals.set:
+                id: current_clean_icon
+                value: !lambda return std::string("\U000F08A0");
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 4;
+          then:
+            - globals.set:
+                id: current_clean_display
+                value: !lambda return "${clean_room3_name}";
+            - globals.set:
+                id: current_clean_icon
+                value: !lambda return std::string("\U000F0AAB");
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 5;
+          then:
+            - globals.set:
+                id: current_clean_display
+                value: !lambda return "${clean_room4_name}";
+            - globals.set:
+                id: current_clean_icon
+                value: !lambda return std::string("\U000F1475");
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 6;
+          then:
+            - globals.set:
+                id: current_clean_display
+                value: !lambda return "${clean_room5_name}";
+            - globals.set:
+                id: current_clean_icon
+                value: !lambda return std::string("\U000F028F");
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 7;
+          then:
+            - globals.set:
+                id: current_clean_display
+                value: !lambda return "${clean_room6_name}";
+            - globals.set:
+                id: current_clean_icon
+                value: !lambda return std::string("\U000F1061");
+      - if:
+          condition:
+            lambda: return id(clean_sel) == ${num_clean_rooms} + 1;
+          then:
+            - globals.set:
+                id: current_clean_display
+                value: !lambda return std::string("Back");
+            - globals.set:
+                id: current_clean_icon
+                value: !lambda return std::string("\U000F0CDD");
+
+  - id: update_cleaning_display
+    mode: single
+    then:
+      - lvgl.label.update:
+          id: clean_icon_lbl
+          text: !lambda return id(current_clean_icon);
+      - lvgl.label.update:
+          id: clean_name_lbl
+          text: !lambda return id(current_clean_display);
+      - lvgl.label.update:
+          id: clean_dots_lbl
+          text: !lambda |-
+            std::string s;
+            int total = ${num_clean_rooms} + 2;
+            for (int i = 0; i < total; i++) {
+              if (i > 0) s += " ";
+              s += (i == id(clean_sel)) ? "●" : "○";
+            }
+            return s;
+
+  - id: enter_cleaning_menu
+    mode: single
+    then:
+      - globals.set: {id: in_cleaning_menu, value: 'true'}
+      - globals.set: {id: clean_sel, value: '0'}
+      - script.execute: get_current_clean_room
+      - script.execute: update_cleaning_display
+      - lvgl.page.show: cleaning_page
+
+  - id: exit_cleaning_menu
+    mode: single
+    then:
+      - globals.set: {id: in_cleaning_menu, value: 'false'}
+      - lvgl.page.show: main_page
+      - script.execute: update_display
+
+  # Settings: single option (WiFi) showing the connected SSID and this device's IP.
+  - id: enter_settings
+    mode: single
+    then:
+      - globals.set: {id: in_settings, value: 'true'}
+      - lvgl.label.update:
+          id: wifi_ssid_lbl
+          text: !lambda |-
+            std::string s = id(wifi_ssid_txt).state;
+            return s.empty() ? std::string("Not connected") : s;
+      - lvgl.label.update:
+          id: wifi_ip_lbl
+          text: !lambda |-
+            std::string s = id(wifi_ip_txt).state;
+            return s.empty() ? std::string("—") : s;
+      - lvgl.page.show: settings_page
+
+  - id: exit_settings
+    mode: single
+    then:
+      - globals.set: {id: in_settings, value: 'false'}
+      - lvgl.page.show: main_page
+      - script.execute: update_display
+
+  # Calls vacuum.juanita directly (no HA automation involved), mirroring how
+  # lights are toggled. clean_sel 0 = whole flat; 1..num_clean_rooms = a single
+  # room, cleaned via a hardcoded Roborock segment id.
+  - id: start_clean
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 0;
+          then:
+            - homeassistant.action:
+                action: vacuum.start
+                data:
+                  entity_id: "${vacuum_entity}"
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 1;
+          then:
+            - homeassistant.action:
+                action: vacuum.send_command
+                data:
+                  entity_id: "${vacuum_entity}"
+                  command: app_segment_clean
+                data_template:
+                  params: "{{ [{'segments': [${clean_room0_id}], 'repeat': 1}] }}"
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 2;
+          then:
+            - homeassistant.action:
+                action: vacuum.send_command
+                data:
+                  entity_id: "${vacuum_entity}"
+                  command: app_segment_clean
+                data_template:
+                  params: "{{ [{'segments': [${clean_room1_id}], 'repeat': 1}] }}"
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 3;
+          then:
+            - homeassistant.action:
+                action: vacuum.send_command
+                data:
+                  entity_id: "${vacuum_entity}"
+                  command: app_segment_clean
+                data_template:
+                  params: "{{ [{'segments': [${clean_room2_id}], 'repeat': 1}] }}"
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 4;
+          then:
+            - homeassistant.action:
+                action: vacuum.send_command
+                data:
+                  entity_id: "${vacuum_entity}"
+                  command: app_segment_clean
+                data_template:
+                  params: "{{ [{'segments': [${clean_room3_id}], 'repeat': 1}] }}"
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 5;
+          then:
+            - homeassistant.action:
+                action: vacuum.send_command
+                data:
+                  entity_id: "${vacuum_entity}"
+                  command: app_segment_clean
+                data_template:
+                  params: "{{ [{'segments': [${clean_room4_id}], 'repeat': 1}] }}"
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 6;
+          then:
+            - homeassistant.action:
+                action: vacuum.send_command
+                data:
+                  entity_id: "${vacuum_entity}"
+                  command: app_segment_clean
+                data_template:
+                  params: "{{ [{'segments': [${clean_room5_id}], 'repeat': 1}] }}"
+      - if:
+          condition:
+            lambda: return id(clean_sel) == 7;
+          then:
+            - homeassistant.action:
+                action: vacuum.send_command
+                data:
+                  entity_id: "${vacuum_entity}"
+                  command: app_segment_clean
+                data_template:
+                  params: "{{ [{'segments': [${clean_room6_id}], 'repeat': 1}] }}"
 
   - id: update_display
     mode: single
@@ -599,7 +1013,7 @@ script:
       - lambda: |-
           lv_color_t target;
           if (!id(dim_mode) || id(sel) >= ${num_lights}) {
-            static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644};
+            static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644, 0x555555, 0x333366};
             target = lv_color_hex(c[id(sel)]);
           } else {
             uint8_t v = (uint8_t)id(current_brightness);
@@ -611,7 +1025,7 @@ script:
           text: !lambda return id(current_icon);
           text_color: !lambda |-
             if (!id(dim_mode) || id(sel) >= ${num_lights}) return lv_color_hex(0xFFFFFF);
-            static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644};
+            static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644, 0x555555, 0x333366};
             return lv_color_hex(c[id(sel)]);
       # Dot row: white in SELECT, room color in DIM
       - lvgl.label.update:
@@ -625,7 +1039,7 @@ script:
             return s;
           text_color: !lambda |-
             if (!id(dim_mode) || id(sel) >= ${num_lights}) return lv_color_hex(0xFFFFFF);
-            static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644};
+            static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644, 0x555555, 0x333366};
             return lv_color_hex(c[id(sel)]);
       - lvgl.label.update:
           id: lbl_timer
@@ -778,15 +1192,16 @@ script:
   - id: timer_beep
     mode: single
     then:
-      - rtttl.play: !lambda |-
-          static const char* tunes[] = {
-            "children:d=16,o=5,b=200:4f7,1p,4g#7,8g7,4d#7,1p,4g#7,8g7,4c7,1p,4g#7,8g7,4g#6,1p,f6,g6,g#6,c7,4f7,1p",
-            "Smurfs:d=32,o=5,b=200:4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8f#,p,8a#,p,4g#,4p,g#,p,a#,p,b,p,c6,p,4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8b,p,8f,p,4f#",
-            "Gadget:d=16,o=5,b=50:32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,32d#,32f,32f#,32g#,a#,d#6,4d6,32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,8d#",
-            "NeverGonna:d=4,o=5,b=200:8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,d6,8p,d6,8p,c6,8b,a.,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6.,p,8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,2g6,b,c6.,8b,a,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6.",
-            "HarryPot:d=8,o=6,b=125:b5,e.,16g,f#,4e,b,4a.,4f#.,e.,16g,f#,4d,f,2b5,p,b5,e.,16g,f#,4e,b,4d7,c#7,4c7,g#,c.7,16b,a#,4f#,g,2e,p,g,4b,g,4b,g,4c7,b,4a#,f#,g.,16b,a#,4a#5,b5,2b"
-          };
-          return std::string(tunes[rand() % 5]);
+      - rtttl.play: "HarryPot:d=8,o=6,b=125:b5,e.,16g,f#,4e,b,4a.,4f#.,e.,16g,f#,4d,f,2b5,p,b5,e.,16g,f#,4e,b,4d7,c#7,4c7,g#,c.7,16b,a#,4f#,g,2e,p,g,4b,g,4b,g,4c7,b,4a#,f#,g.,16b,a#,4a#5,b5,2b"
+
+text_sensor:
+  - platform: wifi_info
+    ssid:
+      id: wifi_ssid_txt
+      internal: true
+    ip_address:
+      id: wifi_ip_txt
+      internal: true
 
 text:
   - platform: template
@@ -874,3 +1289,88 @@ lvgl:
             text: "Air OK"
             text_font: roboto_18
             text_color: 0x88FF88
+        - label:
+            id: canary_reason_lbl
+            align: CENTER
+            y: 85
+            max_width: 90%
+            width: 90%
+            text_align: CENTER
+            text: ""
+            text_font: roboto_18
+            text_color: 0xFF8888
+    - id: cleaning_page
+      bg_color: 0x000000
+      widgets:
+        - obj:
+            id: clean_bg
+            width: 240
+            height: 240
+            align: CENTER
+            bg_color: 0x333333
+            border_width: 0
+            radius: 0
+            pad_all: 0
+        - label:
+            id: clean_icon_lbl
+            align: CENTER
+            y: -30
+            text: "\U000F104D"
+            text_font: mdi_80
+            text_color: 0xFFFFFF
+        - label:
+            id: clean_name_lbl
+            align: CENTER
+            y: 45
+            max_width: 90%
+            width: 90%
+            text_align: CENTER
+            text: "Whole Flat"
+            text_font: roboto_18
+            text_color: 0xFFFFFF
+        - label:
+            id: clean_dots_lbl
+            align: CENTER
+            y: 80
+            text: "● ○ ○ ○ ○ ○ ○ ○ ○"
+            text_font: roboto_dots
+            text_color: 0xFFFFFF
+    - id: settings_page
+      bg_color: 0x000000
+      widgets:
+        - obj:
+            id: settings_bg
+            width: 240
+            height: 240
+            align: CENTER
+            bg_color: 0x222244
+            border_width: 0
+            radius: 0
+            pad_all: 0
+        - label:
+            id: settings_icon_lbl
+            align: CENTER
+            y: -60
+            text: "\U000F05A9"  # wifi
+            text_font: mdi_80
+            text_color: 0xFFFFFF
+        - label:
+            id: wifi_ssid_lbl
+            align: CENTER
+            y: 25
+            max_width: 90%
+            width: 90%
+            text_align: CENTER
+            text: ""
+            text_font: roboto_18
+            text_color: 0xFFFFFF
+        - label:
+            id: wifi_ip_lbl
+            align: CENTER
+            y: 55
+            max_width: 90%
+            width: 90%
+            text_align: CENTER
+            text: ""
+            text_font: roboto_18
+            text_color: 0x99AAFF
