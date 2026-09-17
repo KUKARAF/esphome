@@ -1,0 +1,141 @@
+substitutions:
+  device_name: "RF Remote Bridge"
+  friendly_name: "RF Remote Bridge"
+  # ──── CC1101 <-> ESP32 wiring (change here if you wire it differently) ───────
+  # CC1101 pin      ESP32 pin
+  #   VCC / 3.3V  →  3V3      (do NOT use 5V, the CC1101 is a 3.3V part)
+  #   GND         →  GND
+  #   SCK / SCLK  →  GPIO18
+  #   SI / MOSI   →  GPIO23
+  #   SO / MISO   →  GPIO19
+  #   CSN / CS    →  GPIO5
+  #   GDO0        →  GPIO4    (the demodulated data line the radio uses)
+  #   GDO2        →  (leave unconnected)
+  sck_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+  cs_pin: GPIO5
+  gdo0_pin: GPIO4
+
+esphome:
+  name: rf-remote
+  friendly_name: "${friendly_name}"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+logger:
+  # Keep the log level high enough to see the RF dumps while learning codes.
+  level: DEBUG
+
+# ── SPI bus used only to *configure* the CC1101 radio (not for the RF data) ────
+spi:
+  clk_pin: ${sck_pin}
+  mosi_pin: ${mosi_pin}
+  miso_pin: ${miso_pin}
+
+# ── The 433 MHz radio. It receives the button presses and hands the raw ───────
+#    OOK pulse train to remote_receiver over the GDO0 pin.
+cc1101:
+  cs_pin: ${cs_pin}
+  gdo0_pin:
+    number: ${gdo0_pin}
+    # GDO0 is shared with remote_receiver below (the radio drives it, the
+    # receiver reads it) — both sides must opt into sharing the pin.
+    allow_other_uses: true
+  frequency: 433.92MHz      # standard for these cheap LED remotes
+  modulation_type: ASK/OOK  # what EV1527/PT2262 style remotes use
+  symbol_rate: 5000
+  filter_bandwidth: 203kHz
+  output_power: 10          # only matters if you ever transmit
+
+# ── Decodes the pulse train coming out of the CC1101 on GDO0. ─────────────────
+#    `dump: all` prints every received code to the logs — this is how you learn
+#    each button's code (see the "HOW TO LEARN CODES" note at the bottom).
+remote_receiver:
+  pin:
+    number: ${gdo0_pin}
+    allow_other_uses: true
+    mode:
+      input: true
+  dump: all
+  # Tuning for noisy sub-GHz OOK remotes:
+  tolerance: 50%
+  filter: 250us
+  idle: 4ms
+  buffer_size: 2kb
+
+status_led:
+  pin:
+    number: GPIO2   # onboard LED — blinks on wifi/API issues
+    inverted: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUTTON → LIGHT MAPPING
+# ─────────────────────────────────────────────────────────────────────────────
+# These stay commented until you learn each remote's code. Once you have the
+# codes from the logs, copy a block per button, drop in the code + protocol,
+# and set the light entity to toggle. Then re-flash. See the note at the bottom.
+#
+# binary_sensor:
+#   - platform: remote_receiver
+#     name: "Blue Button"
+#     rc_switch_raw:
+#       code: "000000000001010100010001"   # <- from the logs
+#       protocol: 1                          # <- from the logs
+#     on_press:
+#       - homeassistant.service:
+#           service: light.toggle
+#           data:
+#             entity_id: light.living_room   # <- the light this button controls
+#
+#   - platform: remote_receiver
+#     name: "Red Button"
+#     rc_switch_raw:
+#       code: "000000000001010100010100"
+#       protocol: 1
+#     on_press:
+#       - homeassistant.service:
+#           service: light.toggle
+#           data:
+#             entity_id: light.kitchen
+#
+# If the logs show these remotes under a different dumper (e.g. the log line
+# starts with "received RawTiming" / "received Pronto" instead of "RCSwitch"),
+# tell me and I'll switch the binary_sensor matcher to that protocol instead.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO LEARN CODES
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Wire the CC1101 to the ESP32 as in the substitutions block above, plug the
+#    ESP32 in over USB.
+# 2. First flash over USB:   source .venv/bin/activate
+#                            esphome run rf_remote.yaml
+# 3. Watch the logs (esphome logs rf_remote.yaml) and press each remote button.
+#    For each press you'll see a line like:
+#       [remote.rc_switch] Received RCSwitch Raw: protocol=1 data='0x...'
+#    (or a raw timings / pronto dump). Note the protocol + code for every button.
+# 4. Fill in one binary_sensor block per button above, re-flash, done. After the
+#    first USB flash you can update it wirelessly with:
+#       esphome upload rf_remote.yaml
