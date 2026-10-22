@@ -19,6 +19,10 @@ substitutions:
   # num_items = num_lights + number of action slots (egg timer + find phone + cleaning + settings = 4)
   num_items: "8"
   phone_ring_entity: "button.fmd_rafa_volume_ring_device"
+  # Egg timer lives in HA (timer helper, duration 6:35, restore on) so a dial
+  # reboot can't lose it. HA automation on timer.finished calls the dial's
+  # egg_alarm action to play the tune.
+  egg_timer_entity: "timer.egg"
   # ──── Cleaning (Juanita) ────────────────────────────────────────────────────
   # Calls vacuum.juanita (Roborock) directly — vacuum.start for the whole flat,
   # vacuum.send_command (app_segment_clean) with a hardcoded segment id per room.
@@ -41,9 +45,9 @@ substitutions:
   clean_room6_name: "Jadalnia"
   clean_room6_id: "23"
   # ──── Controller presence (BLE) ─────────────────────────────────────────────
-  # HA watches these binary sensors and fires the bazzite Wake-on-LAN automation.
-  xbox_controller_mac: "68:6C:E6:7A:DE:F4"
-  steam_controller_mac: "EE:DD:40:6E:76:FC"
+  # Controllers are matched by advertised NAME in esp32_ble_tracker below (not
+  # MAC — the Steam controller's address rotates on re-pair). HA watches the
+  # resulting binary sensors and fires the bazzite Wake-on-LAN automation.
   # ────────────────────────────────────────────────────────────────────────────
   sdapin: GPIO11
   sclpin: GPIO12
@@ -61,6 +65,12 @@ esphome:
   on_boot:
     priority: -100
     then:
+      # Initialize controller presence to "off" (template sensors start "unknown",
+      # which would make the wake automation's off->on trigger miss the first
+      # sighting after a reboot).
+      - lambda: |-
+          id(xbox_nearby).publish_state(false);
+          id(steam_nearby).publish_state(false);
       - script.execute: get_current_light
       - script.execute: screentime
       - script.execute: update_display
@@ -84,19 +94,50 @@ captive_portal:
 logger:
   level: DEBUG
 
+# Crash diagnostics: logs the reset reason on boot and exposes it (plus uptime)
+# to HA, so an unexpected reboot shows up as uptime dropping to ~0 with a reason.
+debug:
+  update_interval: 60s
+
+# Wall clock from HA — the egg countdown is computed against finishes_at.
+time:
+  - platform: homeassistant
+    id: ha_time
+
 api:
   encryption:
     key: !secret api_encryption_key
+  # Called by the HA automation when ${egg_timer_entity} finishes
+  # (action: esphome.m5dial_egg_alarm).
+  actions:
+    - action: egg_alarm
+      then:
+        - script.execute: timer_beep
 
 ota:
   platform: esphome
   password: !secret ota_password
 
-# Passive scan: just listen for the controllers' advertisements, never respond
-# (active: false avoids answering scan requests / interfering with pairing).
+# Detect the game controllers by their advertised NAME, not MAC. The Steam
+# controller uses a random address that changes every time it's re-paired
+# (verified 2026-09-21: MAC rotated, name stayed "SteamController"), so matching
+# on MAC breaks after a re-pair. Names are only present in the scan RESPONSE, so
+# active scanning is required here.
 esp32_ble_tracker:
   scan_parameters:
-    active: false
+    active: true
+  on_ble_advertise:
+    then:
+      - lambda: |-
+          const std::string &n = x.get_name();
+          if (n.empty()) return;
+          if (n.find("Xbox Wireless") != std::string::npos) {
+            id(xbox_last_ms) = millis();
+            id(xbox_nearby).publish_state(true);
+          } else if (n.find("SteamController") != std::string::npos) {
+            id(steam_last_ms) = millis();
+            id(steam_nearby).publish_state(true);
+          }
 
 i2c:
   - id: bus_internal
@@ -129,6 +170,9 @@ touchscreen:
     on_touch:
       then:
         - lambda: |-
+            if (id(attention_active)) {
+              return;
+            }
             if (id(canary_visible)) {
               id(dismiss_canary).execute();
               return;
@@ -206,12 +250,28 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  # Brightness dial: timestamp of the last brightness detent + the working
+  # brightness % (0-100). Used for speed-based acceleration and stop-to-wrap.
+  - id: bright_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: bright_pct
+    type: int
+    restore_value: no
+    initial_value: '0'
   - id: timer_running
     type: bool
     restore_value: no
     initial_value: 'false'
   - id: timer_remaining
     type: int
+    restore_value: no
+    initial_value: '0'
+  # finishes_at of ${egg_timer_entity} as unix epoch (0 = unknown), parsed in
+  # the egg_finishes_at text sensor.
+  - id: timer_end_epoch
+    type: int64_t
     restore_value: no
     initial_value: '0'
   - id: blink_entity
@@ -234,6 +294,16 @@ globals:
     type: float
     restore_value: no
     initial_value: '0.0'
+  # Last time (millis) each controller's advertisement was heard; used to time
+  # out the name-based presence sensors below.
+  - id: xbox_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: steam_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   - id: in_cleaning_menu
     type: bool
     restore_value: no
@@ -254,6 +324,12 @@ globals:
     type: std::string
     restore_value: no
     initial_value: '"\U000F104D"'
+  # High-priority "Attention Required" alert. True while the attention_text is
+  # non-empty; drives the takeover page and the repeating 3-tone beep.
+  - id: attention_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
 
 font:
   - file: "gfonts://Roboto"
@@ -283,6 +359,7 @@ font:
       - "\U000F1061"  # mdi:table-chair         → Jadalnia
       - "\U000F0493"  # mdi:cog                 → Settings
       - "\U000F05A9"  # mdi:wifi                → WiFi info
+      - "\U000F0026"  # mdi:alert               → Attention Required
   - file: "gfonts://Roboto"
     id: roboto_dots
     size: 10
@@ -293,6 +370,13 @@ font:
 # Duplicate this block for each additional light — keep entity_id, id, global
 # and the get_current_light if-block in sync.
 sensor:
+  - platform: uptime
+    name: "Uptime"
+  - platform: debug
+    free:
+      name: "Heap Free"
+    min_free:
+      name: "Heap Min Free"
   - platform: homeassistant
     entity_id: ${light0_entity}
     attribute: brightness
@@ -416,12 +500,37 @@ sensor:
     on_clockwise:
       then:
         - lambda: |-
+            if (id(attention_active)) {
+              return;
+            }
             if (id(canary_visible)) {
               id(dismiss_canary).execute();
               return;
             }
-            if ((millis() - id(last_encoder_ms)) < 80) return;
-            id(last_encoder_ms) = millis();
+            uint32_t now = millis();
+            // Brightness adjust: accelerate with turn speed, no 80ms throttle.
+            if (id(dim_mode) && id(sel) < ${num_lights} && !id(in_settings) && !id(in_cleaning_menu)) {
+              uint32_t dt = now - id(bright_last_ms);
+              id(bright_last_ms) = now;
+              id(last_encoder_ms) = now;
+              id(screentime).execute();
+              // Fresh turn (paused >=500ms): re-anchor to the light's real level.
+              if (dt >= 500) id(bright_pct) = (id(current_brightness) * 100 + 127) / 255;
+              int step = dt < 25 ? 25 : dt < 50 ? 15 : dt < 100 ? 9 : dt < 200 ? 6 : 4;
+              if (id(bright_pct) >= 100) {
+                // At max: keep turning stays at 100; stop then turn wraps to off.
+                if (dt >= 500) id(bright_pct) = 0;
+              } else {
+                id(bright_pct) += step;
+                if (id(bright_pct) > 100) id(bright_pct) = 100;  // land on 100, no wrap
+              }
+              id(current_brightness) = id(bright_pct) * 255 / 100;
+              id(set_brightness).execute();
+              id(update_display).execute();
+              return;
+            }
+            if ((now - id(last_encoder_ms)) < 80) return;
+            id(last_encoder_ms) = now;
             id(screentime).execute();
             if (id(in_settings)) return;
             if (id(in_cleaning_menu)) {
@@ -430,24 +539,45 @@ sensor:
               id(update_cleaning_display).execute();
               return;
             }
-            if (!id(dim_mode) || id(sel) >= ${num_lights}) {
-              if (id(sel) < ${num_lights}) id(restore_blink_light).execute();
-              id(sel) = (id(sel) + 1) % ${num_items};
-              id(get_current_light).execute();
-              id(update_display).execute();
-              if (id(sel) < ${num_lights}) id(select_blink).execute();
-            } else {
-              id(brightness_up).execute();
-            }
+            if (id(sel) < ${num_lights}) id(restore_blink_light).execute();
+            id(sel) = (id(sel) + 1) % ${num_items};
+            id(get_current_light).execute();
+            id(update_display).execute();
+            if (id(sel) < ${num_lights}) id(select_blink).execute();
     on_anticlockwise:
       then:
         - lambda: |-
+            if (id(attention_active)) {
+              return;
+            }
             if (id(canary_visible)) {
               id(dismiss_canary).execute();
               return;
             }
-            if ((millis() - id(last_encoder_ms)) < 80) return;
-            id(last_encoder_ms) = millis();
+            uint32_t now = millis();
+            // Brightness adjust: accelerate with turn speed, no 80ms throttle.
+            if (id(dim_mode) && id(sel) < ${num_lights} && !id(in_settings) && !id(in_cleaning_menu)) {
+              uint32_t dt = now - id(bright_last_ms);
+              id(bright_last_ms) = now;
+              id(last_encoder_ms) = now;
+              id(screentime).execute();
+              // Fresh turn (paused >=500ms): re-anchor to the light's real level.
+              if (dt >= 500) id(bright_pct) = (id(current_brightness) * 100 + 127) / 255;
+              int step = dt < 25 ? 25 : dt < 50 ? 15 : dt < 100 ? 9 : dt < 200 ? 6 : 4;
+              if (id(bright_pct) <= 0) {
+                // At off: keep turning stays off; stop then turn wraps to full.
+                if (dt >= 500) id(bright_pct) = 100;
+              } else {
+                id(bright_pct) -= step;
+                if (id(bright_pct) < 0) id(bright_pct) = 0;  // land on off, no wrap
+              }
+              id(current_brightness) = id(bright_pct) * 255 / 100;
+              id(set_brightness).execute();
+              id(update_display).execute();
+              return;
+            }
+            if ((now - id(last_encoder_ms)) < 80) return;
+            id(last_encoder_ms) = now;
             id(screentime).execute();
             if (id(in_settings)) return;
             if (id(in_cleaning_menu)) {
@@ -456,33 +586,29 @@ sensor:
               id(update_cleaning_display).execute();
               return;
             }
-            if (!id(dim_mode) || id(sel) >= ${num_lights}) {
-              if (id(sel) < ${num_lights}) id(restore_blink_light).execute();
-              id(sel) = (id(sel) + ${num_items} - 1) % ${num_items};
-              id(get_current_light).execute();
-              id(update_display).execute();
-              if (id(sel) < ${num_lights}) id(select_blink).execute();
-            } else {
-              id(brightness_down).execute();
-            }
+            if (id(sel) < ${num_lights}) id(restore_blink_light).execute();
+            id(sel) = (id(sel) + ${num_items} - 1) % ${num_items};
+            id(get_current_light).execute();
+            id(update_display).execute();
+            if (id(sel) < ${num_lights}) id(select_blink).execute();
 
 binary_sensor:
-  # On while the controller is advertising, off after `timeout` of silence.
-  # Controllers advertise in bursts with gaps, so hold "on" for 2 min after the
-  # last sighting; HA then only sees one off->on per real arrival.
-  - platform: ble_presence
-    mac_address: ${xbox_controller_mac}
+  # Driven by name matches in esp32_ble_tracker.on_ble_advertise above. Set true
+  # on each sighting; the 1s interval clears them after 15s of silence. The
+  # controllers advertise in bursts with gaps, so hold "on" for 30s after the
+  # last sighting via delayed_off; HA then sees one off->on per real arrival and
+  # the sensor re-arms quickly once the controller actually leaves.
+  - platform: template
+    id: xbox_nearby
     name: "Xbox Controller Nearby"
-    timeout: 15s
     filters:
-      - delayed_off: 2min
+      - delayed_off: 30s
 
-  - platform: ble_presence
-    mac_address: ${steam_controller_mac}
+  - platform: template
+    id: steam_nearby
     name: "Steam Controller Nearby"
-    timeout: 15s
     filters:
-      - delayed_off: 2min
+      - delayed_off: 30s
 
   - platform: gpio
     pin:
@@ -498,6 +624,10 @@ binary_sensor:
           - OFF for at least 50ms
         then:
           - lambda: |-
+              if (id(attention_active)) {
+                id(acknowledge_attention).execute();
+                return;
+              }
               if (id(canary_visible)) {
                 id(dismiss_canary).execute();
                 return;
@@ -535,6 +665,10 @@ binary_sensor:
           - ON for at least 700ms
         then:
           - lambda: |-
+              if (id(attention_active)) {
+                id(acknowledge_attention).execute();
+                return;
+              }
               if (id(canary_visible)) {
                 id(dismiss_canary).execute();
                 return;
@@ -548,16 +682,31 @@ interval:
   - interval: 1s
     then:
       - lambda: |-
+          // Clear controller presence after 15s without a fresh advertisement.
+          // MUST run every tick (independent of the egg timer) so the sensors
+          // re-arm; otherwise they latch ON and the wake never re-triggers.
+          uint32_t now = millis();
+          if (id(xbox_last_ms) && now - id(xbox_last_ms) > 15000) id(xbox_nearby).publish_state(false);
+          if (id(steam_last_ms) && now - id(steam_last_ms) > 15000) id(steam_nearby).publish_state(false);
+          // Egg countdown: HA owns the timer (state + finishes_at); we only
+          // derive the remaining seconds for display. HA fires the alarm.
+          auto t_now = id(ha_time).now();
+          id(timer_running) = id(egg_state).state == "active" &&
+                              id(timer_end_epoch) != 0 && t_now.is_valid();
           if (!id(timer_running)) return;
-          id(timer_remaining) = id(timer_remaining) - 1;
-          if (id(timer_remaining) <= 0) {
-            id(timer_running) = false;
-            id(timer_remaining) = 0;
-            id(timer_beep).execute();
-          }
+          int64_t left = id(timer_end_epoch) - (int64_t) t_now.timestamp;
+          id(timer_remaining) = left > 0 ? (int) left : 0;
           if (id(sel) == ${num_lights}) {
             id(update_display).execute();
           }
+  # Re-nag every 5 minutes while an attention alert is unacknowledged.
+  - interval: 5min
+    then:
+      - if:
+          condition:
+            lambda: return id(attention_active);
+          then:
+            - script.execute: attention_beep
 
 script:
   - id: screentime
@@ -565,27 +714,37 @@ script:
     then:
       - light.turn_on: back_light
       - if:
-          condition: {lambda: return id(in_cleaning_menu);}
+          condition: {lambda: return id(attention_active);}
           then:
-            - lvgl.page.show: cleaning_page
+            - lvgl.page.show: attention_page
           else:
             - if:
-                condition: {lambda: return id(in_settings);}
+                condition: {lambda: return id(in_cleaning_menu);}
                 then:
-                  - lvgl.page.show: settings_page
+                  - lvgl.page.show: cleaning_page
                 else:
-                  - lvgl.page.show: main_page
+                  - if:
+                      condition: {lambda: return id(in_settings);}
+                      then:
+                        - lvgl.page.show: settings_page
+                      else:
+                        - lvgl.page.show: main_page
       - delay: ${screensaver}
       - script.execute: show_canary
 
   - id: show_canary
     mode: single
     then:
-      - globals.set:
-          id: canary_visible
-          value: 'true'
-      - script.execute: update_canary_display
-      - lvgl.page.show: canary_page
+      - if:
+          condition: {lambda: return id(attention_active);}
+          then:
+            - lvgl.page.show: attention_page
+          else:
+            - globals.set:
+                id: canary_visible
+                value: 'true'
+            - script.execute: update_canary_display
+            - lvgl.page.show: canary_page
 
   - id: dismiss_canary
     mode: single
@@ -1009,17 +1168,30 @@ script:
   - id: update_display
     mode: single
     then:
-      # SELECT: colored bg + white icon. DIM: gray bg (brightness) + room-colored icon.
+      # SELECT: colored bg + white icon. DIM: dark multimeter face + gauge needle.
       - lambda: |-
           lv_color_t target;
           if (!id(dim_mode) || id(sel) >= ${num_lights}) {
             static const uint32_t c[] = {0x005599, 0xAA4400, 0xAA7700, 0x005533, 0x885500, 0x006644, 0x555555, 0x333366};
             target = lv_color_hex(c[id(sel)]);
           } else {
-            uint8_t v = (uint8_t)id(current_brightness);
-            target = lv_color_make(v, v, v);
+            target = lv_color_hex(0x111111);   // multimeter face
           }
           m5dial_animate_bg(id(bg), target, 300);
+      # DIM mode: show the analogue brightness gauge (ticks 0/25/50/75/100 + red
+      # needle); the central hub keeps the needle from touching the room icon.
+      - if:
+          condition:
+            lambda: return id(dim_mode) && id(sel) < ${num_lights};
+          then:
+            - lvgl.widget.show: bright_meter
+            - lvgl.widget.show: bright_hub
+            - lvgl.indicator.update:
+                id: bright_needle
+                value: !lambda return (id(current_brightness) * 100 + 127) / 255;
+          else:
+            - lvgl.widget.hide: bright_meter
+            - lvgl.widget.hide: bright_hub
       - lvgl.label.update:
           id: lbl_icon
           text: !lambda return id(current_icon);
@@ -1052,13 +1224,14 @@ script:
             }
             return std::string("");
 
-  # Rotating up when light is off turns it on at default/last brightness.
-  - id: brightness_up
+  # Push the working brightness (id(bright_pct), 0-100) to the current light.
+  # 0 means off; the encoder handlers compute the accelerated value.
+  - id: set_brightness
     mode: queued
     then:
       - if:
           condition:
-            lambda: return (id(current_brightness) * 100 / 255) + 10 > 100;
+            lambda: return id(bright_pct) <= 0;
           then:
             - homeassistant.action:
                 action: light.turn_off
@@ -1069,28 +1242,7 @@ script:
                 action: light.turn_on
                 data:
                   entity_id: !lambda return id(current_entity);
-                  brightness_pct: !lambda |-
-                    return std::to_string((id(current_brightness) * 100 / 255) + 10);
-
-  - id: brightness_down
-    mode: queued
-    then:
-      - if:
-          condition:
-            lambda: return (id(current_brightness) * 100 / 255) - 10 < 1;
-          then:
-            - homeassistant.action:
-                action: light.turn_on
-                data:
-                  entity_id: !lambda return id(current_entity);
-                  brightness_pct: "100"
-          else:
-            - homeassistant.action:
-                action: light.turn_on
-                data:
-                  entity_id: !lambda return id(current_entity);
-                  brightness_pct: !lambda |-
-                    return std::to_string((id(current_brightness) * 100 / 255) - 10);
+                  brightness_pct: !lambda return std::to_string(id(bright_pct));
 
   - id: select_blink
     mode: restart
@@ -1169,17 +1321,15 @@ script:
           data:
             entity_id: !lambda return id(current_entity);
 
-  # Short press on egg timer slot starts/restarts the countdown.
+  # Short press on egg timer slot starts/restarts the HA timer (its default
+  # duration, 6 min 35 sec, is set on the helper).
   - id: start_egg_timer
     mode: restart
     then:
-      - globals.set:
-          id: timer_running
-          value: 'true'
-      - globals.set:
-          id: timer_remaining
-          value: '395'  # 6 min 35 sec
-      - script.execute: update_display
+      - homeassistant.action:
+          action: timer.start
+          data:
+            entity_id: "${egg_timer_entity}"
 
   - id: ring_phone
     mode: single
@@ -1194,7 +1344,80 @@ script:
     then:
       - rtttl.play: "HarryPot:d=8,o=6,b=125:b5,e.,16g,f#,4e,b,4a.,4f#.,e.,16g,f#,4d,f,2b5,p,b5,e.,16g,f#,4e,b,4d7,c#7,4c7,g#,c.7,16b,a#,4f#,g,2e,p,g,4b,g,4b,g,4c7,b,4a#,f#,g.,16b,a#,4a#5,b5,2b"
 
+  # ──── Attention Required ─────────────────────────────────────────────────────
+  # Three ascending, distinct tones — the "you need to look at the dial" alert.
+  - id: attention_beep
+    mode: single
+    then:
+      - rtttl.play: "attn:d=8,o=6,b=200:c,e,g"
+
+  # Raise the alert: take over the screen with the message and beep once now.
+  # (The 5-min interval keeps re-beeping until acknowledged.)
+  - id: raise_attention
+    mode: single
+    then:
+      - globals.set: {id: attention_active, value: 'true'}
+      - globals.set: {id: canary_visible, value: 'false'}
+      - light.turn_on: back_light
+      - lvgl.label.update:
+          id: attention_msg_lbl
+          text: !lambda return id(attention_text).state;
+      - lvgl.page.show: attention_page
+      - script.execute: attention_beep
+
+  # Acknowledge: clearing the text is the single source of truth. Emptying it
+  # fires the text's on_value, which flips attention_active off and restores the
+  # normal UI via clear_attention_ui.
+  - id: acknowledge_attention
+    mode: single
+    then:
+      - text.set:
+          id: attention_text
+          value: ""
+
+  # Tear down the alert UI once the text is empty.
+  - id: clear_attention_ui
+    mode: single
+    then:
+      - globals.set: {id: attention_active, value: 'false'}
+      - script.execute: screentime
+
 text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Reset Reason"
+  - platform: homeassistant
+    id: egg_state
+    entity_id: ${egg_timer_entity}
+    internal: true
+    on_value:
+      - script.execute: update_display
+  # HA sends e.g. "2026-10-21T08:00:00+00:00"; HA doesn't send updates while the
+  # attribute is absent (idle), so egg_state gates whether it's used.
+  - platform: homeassistant
+    id: egg_finishes_at
+    entity_id: ${egg_timer_entity}
+    attribute: finishes_at
+    internal: true
+    on_value:
+      - lambda: |-
+          int Y, M, D, h, m, sec, oh = 0, om = 0;
+          char sign = '+';
+          int n = sscanf(x.c_str(), "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &m, &sec);
+          if (n != 6) { id(timer_end_epoch) = 0; return; }
+          // Optional fractional seconds, then +HH:MM / -HH:MM offset.
+          const char *tz = x.c_str() + 19;
+          while (*tz == '.' || (*tz >= '0' && *tz <= '9')) tz++;
+          if (*tz == '+' || *tz == '-') { sign = *tz; sscanf(tz + 1, "%d:%d", &oh, &om); }
+          // days_from_civil (Howard Hinnant) — avoids timegm/TZ dependence.
+          int y = Y - (M <= 2);
+          int era = (y >= 0 ? y : y - 399) / 400;
+          int yoe = y - era * 400;
+          int doy = (153 * (M + (M > 2 ? -3 : 9)) + 2) / 5 + D - 1;
+          int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+          int64_t days = (int64_t) era * 146097 + doe - 719468;
+          int64_t off = (oh * 3600 + om * 60) * (sign == '-' ? -1 : 1);
+          id(timer_end_epoch) = days * 86400 + h * 3600 + m * 60 + sec - off;
   - platform: wifi_info
     ssid:
       id: wifi_ssid_txt
@@ -1211,12 +1434,40 @@ text:
     optimistic: true
     initial_value: ""
 
+  # High-priority notification. Set this (from HA) to raise an alert on the dial;
+  # it clears itself when acknowledged. Restored across reboots so an urgent
+  # alert survives a device restart.
+  - platform: template
+    name: "Attention Required"
+    id: attention_text
+    mode: text
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            id(attention_active) = !x.empty();
+        - if:
+            condition:
+              lambda: return id(attention_active);
+            then:
+              - script.execute: raise_attention
+            else:
+              - script.execute: clear_attention_ui
+
 button:
   - platform: template
     name: "Play RTTTL"
     on_press:
       then:
         - rtttl.play: !lambda 'return id(rtttl_song).state;'
+
+  # Remote acknowledge — same effect as pressing the dial button.
+  - platform: template
+    name: "Acknowledge Attention"
+    on_press:
+      then:
+        - script.execute: acknowledge_attention
 
 lvgl:
   buffer_size: 50%
@@ -1239,6 +1490,51 @@ lvgl:
             border_width: 0
             radius: 0
             pad_all: 0
+        # DIM-mode brightness gauge: analogue-multimeter scale (0/25/50/75/100)
+        # with a red needle pointing at the current brightness. Hidden in SELECT.
+        - meter:
+            id: bright_meter
+            width: 210
+            height: 210
+            align: CENTER
+            bg_opa: TRANSP
+            border_width: 0
+            hidden: true
+            scales:
+              - range_from: 0
+                range_to: 100
+                angle_range: 270
+                rotation: 135
+                ticks:
+                  count: 21
+                  width: 2
+                  length: 9
+                  color: 0x666666
+                  major:
+                    stride: 5
+                    width: 4
+                    length: 14
+                    color: 0xDDDDDD
+                    label_gap: 6
+                indicators:
+                  - line:
+                      id: bright_needle
+                      width: 4
+                      color: 0xFF0000
+                      length: 92
+                      value: 0
+        # Central hub cap — hides the needle's base so it never touches the icon.
+        - obj:
+            id: bright_hub
+            width: 96
+            height: 96
+            align: CENTER
+            bg_color: 0x1A1A1A
+            bg_opa: COVER
+            border_width: 0
+            radius: 48
+            pad_all: 0
+            hidden: true
         # Large room icon centred on screen
         - label:
             id: lbl_icon
@@ -1374,3 +1670,39 @@ lvgl:
             text: ""
             text_font: roboto_18
             text_color: 0x99AAFF
+    - id: attention_page
+      bg_color: 0x330000
+      widgets:
+        - obj:
+            id: attention_bg
+            width: 240
+            height: 240
+            align: CENTER
+            bg_color: 0x550000
+            border_width: 0
+            radius: 0
+            pad_all: 0
+        - label:
+            id: attention_icon_lbl
+            align: CENTER
+            y: -60
+            text: "\U000F0026"  # alert
+            text_font: mdi_80
+            text_color: 0xFF3333
+        - label:
+            id: attention_msg_lbl
+            align: CENTER
+            y: 35
+            max_width: 90%
+            width: 90%
+            text_align: CENTER
+            text: ""
+            text_font: roboto_18
+            text_color: 0xFFFFFF
+        - label:
+            id: attention_hint_lbl
+            align: CENTER
+            y: 95
+            text: "Press to dismiss"
+            text_font: roboto_18
+            text_color: 0xFF9999
