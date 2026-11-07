@@ -1,0 +1,82 @@
+substitutions:
+  name: "desk-dimmer-test"
+  light: "light.desk_light_desk_light"
+  step: "26"  # ~10% of 255
+
+esphome:
+  name: ${name}
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+logger:
+  level: DEBUG
+
+globals:
+  - id: desk_br
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+sensor:
+  - platform: homeassistant
+    entity_id: ${light}
+    attribute: brightness
+    id: ha_desk_br
+    on_value:
+      then:
+        - globals.set:
+            id: desk_br
+            value: !lambda |-
+              if (std::isnan(x)) return 0;
+              return (int)x;
+        - logger.log:
+            format: "HA brightness: %d"
+            args: [id(desk_br)]
+
+  - platform: rotary_encoder
+    id: encoder
+    pin_a:
+      number: GPIO40
+      mode: {input: true, pullup: true}
+    pin_b:
+      number: GPIO41
+      mode: {input: true, pullup: true}
+    resolution: 1
+    on_clockwise:
+      then:
+        - logger.log:
+            format: "CW brightness=%d -> %d"
+            args: [id(desk_br), (int)std::min(255, id(desk_br) + ${step})]
+        - homeassistant.action:
+            action: light.turn_on
+            data:
+              entity_id: "${light}"
+              brightness: !lambda |-
+                return std::to_string(std::min(255, id(desk_br) + ${step}));
+    on_anticlockwise:
+      then:
+        - logger.log:
+            format: "CCW brightness=%d -> %d"
+            args: [id(desk_br), (int)std::max(1, id(desk_br) - ${step})]
+        - homeassistant.action:
+            action: light.turn_on
+            data:
+              entity_id: "${light}"
+              brightness: !lambda |-
+                return std::to_string(std::max(1, id(desk_br) - ${step}));

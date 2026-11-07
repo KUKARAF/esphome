@@ -1,0 +1,56 @@
+substitutions:
+  device_name: "Controller Sensor"
+  friendly_name: "Controller Sensor"
+
+esphome:
+  name: controller-sensor
+  friendly_name: "${friendly_name}"
+
+esp32:
+  board: esp32dev   # ESP32-WROOM-32 DevKit (generic ESP32)
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+
+# Passive scan: just listen for the controllers' advertisements, never respond
+# (active: false avoids the ESP answering scan requests / interfering with pairing).
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+
+# One binary sensor per controller. Turns on when the ESP hears the controller
+# advertising, turns off after `timeout` of silence. HA watches these and fires
+# the Wake-on-LAN automation.
+binary_sensor:
+  - platform: ble_presence
+    mac_address: 68:6C:E6:7A:DE:F4
+    name: "Xbox Controller Nearby"
+    timeout: 15s
+
+  - platform: ble_presence
+    mac_address: EE:DD:40:6E:76:FC
+    name: "Steam Controller Nearby"
+    timeout: 15s
+
+# Time sync with Home Assistant (handy for log timestamps)
+time:
+  - platform: homeassistant
+    id: homeassistant_time
