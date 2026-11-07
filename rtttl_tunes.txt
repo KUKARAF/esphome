@@ -1,0 +1,12 @@
+# Unused RTTTL tunes (previously in m5dial.yaml egg timer random selection).
+# The egg timer now hardcodes HarryPot. Kept here for future reuse.
+
+children:d=16,o=5,b=200:4f7,1p,4g#7,8g7,4d#7,1p,4g#7,8g7,4c7,1p,4g#7,8g7,4g#6,1p,f6,g6,g#6,c7,4f7,1p
+
+Smurfs:d=32,o=5,b=200:4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8f#,p,8a#,p,4g#,4p,g#,p,a#,p,b,p,c6,p,4c#6,16p,4f#6,p,16c#6,p,8d#6,p,8b,p,4g#,16p,4c#6,p,16a#,p,8b,p,8f,p,4f#
+
+Gadget:d=16,o=5,b=50:32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,32d#,32f,32f#,32g#,a#,d#6,4d6,32d#,32f,32f#,32g#,a#,f#,a,f,g#,f#,8d#
+
+NeverGonna:d=4,o=5,b=200:8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,d6,8p,d6,8p,c6,8b,a.,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6.,p,8g,8a,8c6,8a,e6,8p,e6,8p,d6.,p,8p,8g,8a,8c6,8a,2g6,b,c6.,8b,a,8g,8a,8c6,8a,2c6,d6,b,a,g.,8p,g,2d6,2c6.
+
+HarryPot:d=8,o=6,b=125:b5,e.,16g,f#,4e,b,4a.,4f#.,e.,16g,f#,4d,f,2b5,p,b5,e.,16g,f#,4e,b,4d7,c#7,4c7,g#,c.7,16b,a#,4f#,g,2e,p,g,4b,g,4b,g,4c7,b,4a#,f#,g.,16b,a#,4a#5,b5,2b

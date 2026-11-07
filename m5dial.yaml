@@ -19,6 +19,10 @@ substitutions:
   # num_items = num_lights + number of action slots (egg timer + find phone + cleaning + settings = 4)
   num_items: "8"
   phone_ring_entity: "button.fmd_rafa_volume_ring_device"
+  # 24h rolling price data (next_cheapest/next_most_expensive sensors, plus the
+  # "series" attribute on the cheapest one) feeding the main_page price ring.
+  cheapest_price_entity: "sensor.pstryk_next_cheapest_price_24h"
+  most_expensive_price_entity: "sensor.pstryk_next_most_expensive_price_24h"
   # Egg timer lives in HA (timer helper, duration 6:35, restore on) so a dial
   # reboot can't lose it. HA automation on timer.finished calls the dial's
   # egg_alarm action to play the tune.
@@ -274,6 +278,13 @@ globals:
     type: int64_t
     restore_value: no
     initial_value: '0'
+  # Raw "series" attribute string from ${cheapest_price_entity} (comma-separated
+  # prices, index 0 = current hour), cached here so update_price_ring can
+  # re-parse it whenever price_min_24h/price_max_24h change too.
+  - id: ring_series_raw
+    type: std::string
+    restore_value: no
+    initial_value: '""'
   - id: blink_entity
     type: std::string
     restore_value: no
@@ -487,6 +498,22 @@ sensor:
             then:
               - script.execute: update_canary_display
 
+  # Min/max of the next 24h price window, for color-scaling the price ring
+  # (same pattern as electricity_consumption_assistant.yaml's price LED).
+  - platform: homeassistant
+    id: price_min_24h
+    entity_id: ${cheapest_price_entity}
+    internal: true
+    on_value:
+      - script.execute: update_price_ring
+
+  - platform: homeassistant
+    id: price_max_24h
+    entity_id: ${most_expensive_price_entity}
+    internal: true
+    on_value:
+      - script.execute: update_price_ring
+
   - platform: rotary_encoder
     name: "Rotary Encoder"
     id: rotaryencoder
@@ -688,9 +715,12 @@ interval:
           uint32_t now = millis();
           if (id(xbox_last_ms) && now - id(xbox_last_ms) > 15000) id(xbox_nearby).publish_state(false);
           if (id(steam_last_ms) && now - id(steam_last_ms) > 15000) id(steam_nearby).publish_state(false);
+          auto t_now = id(ha_time).now();
+          if (id(canary_visible)) {
+            id(update_clock_hands).execute();
+          }
           // Egg countdown: HA owns the timer (state + finishes_at); we only
           // derive the remaining seconds for display. HA fires the alarm.
-          auto t_now = id(ha_time).now();
           id(timer_running) = id(egg_state).state == "active" &&
                               id(timer_end_epoch) != 0 && t_now.is_valid();
           if (!id(timer_running)) return;
@@ -744,6 +774,7 @@ script:
                 id: canary_visible
                 value: 'true'
             - script.execute: update_canary_display
+            - script.execute: update_clock_hands
             - lvgl.page.show: canary_page
 
   - id: dismiss_canary
@@ -786,6 +817,34 @@ script:
           }
           lv_label_set_text(id(canary_reason_lbl), reason.c_str());
           lv_obj_invalidate(id(canary_bg));
+          // Bad air: show the warning icon/text, hide the price ring.
+          // Air OK: nothing actionable to show, so swap in the price ring.
+          if (bad) {
+            lv_obj_clear_flag(id(canary_icon_lbl), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(canary_status_lbl), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(id(canary_reason_lbl), LV_OBJ_FLAG_HIDDEN);
+          } else {
+            lv_obj_add_flag(id(canary_icon_lbl), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(id(canary_status_lbl), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(id(canary_reason_lbl), LV_OBJ_FLAG_HIDDEN);
+          }
+          lv_obj_t *price_segs[24] = {
+            id(price_seg0),  id(price_seg1),  id(price_seg2),  id(price_seg3),
+            id(price_seg4),  id(price_seg5),  id(price_seg6),  id(price_seg7),
+            id(price_seg8),  id(price_seg9),  id(price_seg10), id(price_seg11),
+            id(price_seg12), id(price_seg13), id(price_seg14), id(price_seg15),
+            id(price_seg16), id(price_seg17), id(price_seg18), id(price_seg19),
+            id(price_seg20), id(price_seg21), id(price_seg22), id(price_seg23),
+          };
+          for (int i = 0; i < 24; i++) {
+            if (bad) {
+              lv_obj_add_flag(price_segs[i], LV_OBJ_FLAG_HIDDEN);
+            } else {
+              lv_obj_clear_flag(price_segs[i], LV_OBJ_FLAG_HIDDEN);
+            }
+          }
+      # Keep the ring's colors fresh whenever it's about to be (re)shown.
+      - script.execute: update_price_ring
 
   # Updates current_entity, current_name, current_brightness from sel.
   # Add one if-block here for each additional light.
@@ -1072,6 +1131,85 @@ script:
       - globals.set: {id: in_settings, value: 'false'}
       - lvgl.page.show: main_page
       - script.execute: update_display
+
+  # Recomputes the 24-segment price ring on main_page. Triggered by on_value
+  # of price_series (new data) and of price_min_24h/price_max_24h (range
+  # changed) — price data only refreshes hourly, so no per-second tick is
+  # needed here (unlike the old countdown this replaces).
+  - id: update_price_ring
+    mode: single
+    then:
+      - lambda: |-
+          float prices[24];
+          int count = 0;
+          {
+            const std::string &s = id(ring_series_raw);
+            size_t pos = 0;
+            while (count < 24 && pos <= s.size()) {
+              size_t comma = s.find(',', pos);
+              std::string tok = (comma == std::string::npos) ? s.substr(pos) : s.substr(pos, comma - pos);
+              if (!tok.empty()) {
+                prices[count++] = strtof(tok.c_str(), nullptr);
+              }
+              if (comma == std::string::npos) break;
+              pos = comma + 1;
+            }
+          }
+          float pmin = id(price_min_24h).state;
+          float pmax = id(price_max_24h).state;
+          bool have_range = !std::isnan(pmin) && !std::isnan(pmax);
+          bool flat = have_range && (pmax - pmin) < 0.001f;
+          auto t_ring = id(ha_time).now();
+          int current_hour = t_ring.is_valid() ? t_ring.hour : 0;
+          lv_obj_t *segs[24] = {
+            id(price_seg0),  id(price_seg1),  id(price_seg2),  id(price_seg3),
+            id(price_seg4),  id(price_seg5),  id(price_seg6),  id(price_seg7),
+            id(price_seg8),  id(price_seg9),  id(price_seg10), id(price_seg11),
+            id(price_seg12), id(price_seg13), id(price_seg14), id(price_seg15),
+            id(price_seg16), id(price_seg17), id(price_seg18), id(price_seg19),
+            id(price_seg20), id(price_seg21), id(price_seg22), id(price_seg23),
+          };
+          for (int i = 0; i < 24; i++) {
+            lv_color_t col;
+            if (i >= count || !have_range) {
+              col = lv_color_make(0x44, 0x44, 0x44);  // neutral: no data (yet)
+            } else if (flat) {
+              col = lv_color_make(0x00, 0xFF, 0x00);  // flat-day fallback: green
+            } else {
+              float ratio = (prices[i] - pmin) / (pmax - pmin);
+              if (ratio < 0.0f) ratio = 0.0f;
+              if (ratio > 1.0f) ratio = 1.0f;
+              col = lv_color_make((uint8_t) (ratio * 255.0f), (uint8_t) ((1.0f - ratio) * 255.0f), 0);
+            }
+            // segments now represent absolute hour-of-day, not hours-from-now,
+            // so they stay aligned with the real clock hands — map each
+            // price's hour-offset to its actual hour-of-day position.
+            int abs_hour = (current_hour + i) % 24;
+            lv_obj_set_style_arc_color(segs[abs_hour], col, LV_PART_INDICATOR);
+          }
+
+  # Draws the red hour/minute hands on canary_page's analog price clock.
+  # Pivot (120,120) = true center, matching the ring's own center.
+  # Called once from show_canary and every 1s while canary_visible.
+  - id: update_clock_hands
+    mode: single
+    then:
+      - lambda: |-
+          auto t = id(ha_time).now();
+          if (!t.is_valid()) return;
+          int16_t cx = 120, cy = 120;
+          float min_deg = t.minute * 6.0f;
+          float hour_deg = (t.hour % 12) * 30.0f + t.minute * 0.5f;
+          float min_rad = min_deg * M_PI / 180.0f;
+          float hour_rad = hour_deg * M_PI / 180.0f;
+          float hour_len = 55.0f;
+          float min_len = 75.0f;
+          int16_t hour_x = cx + (int16_t) (hour_len * sin(hour_rad));
+          int16_t hour_y = cy - (int16_t) (hour_len * cos(hour_rad));
+          int16_t min_x = cx + (int16_t) (min_len * sin(min_rad));
+          int16_t min_y = cy - (int16_t) (min_len * cos(min_rad));
+          id(clock_hour_hand)->set_points({{cx, cy}, {hour_x, hour_y}});
+          id(clock_minute_hand)->set_points({{cx, cy}, {min_x, min_y}});
 
   # Calls vacuum.juanita directly (no HA automation involved), mirroring how
   # lights are toggled. clean_sel 0 = whole flat; 1..num_clean_rooms = a single
@@ -1418,6 +1556,19 @@ text_sensor:
           int64_t days = (int64_t) era * 146097 + doe - 719468;
           int64_t off = (oh * 3600 + om * 60) * (sign == '-' ? -1 : 1);
           id(timer_end_epoch) = days * 86400 + h * 3600 + m * 60 + sec - off;
+  # Comma-separated 24h price series (index 0 = current hour), feeding the
+  # main_page price ring. Re-parsed in update_price_ring, which is also
+  # triggered whenever price_min_24h/price_max_24h change.
+  - platform: homeassistant
+    id: price_series
+    entity_id: ${cheapest_price_entity}
+    attribute: series
+    internal: true
+    on_value:
+      - globals.set:
+          id: ring_series_raw
+          value: !lambda return x;
+      - script.execute: update_price_ring
   - platform: wifi_info
     ssid:
       id: wifi_ssid_txt
@@ -1571,6 +1722,440 @@ lvgl:
             border_width: 0
             radius: 0
             pad_all: 0
+        # 24-segment "price clock" ring around the edge — one 15° wedge per
+        # ABSOLUTE hour-of-day (price_segH sits at hour H's position on a
+        # standard analog clock face doubled for 24h, e.g. 6am AND 6pm both
+        # sit at the bottom, 9am AND 9pm both sit at the right — exactly the
+        # same convention as the real clock_hour_hand/clock_minute_hand, so
+        # the hands always point into the wedge for the current hour), colored
+        # green (cheapest) → red (most expensive) by update_price_ring.
+        # Lives on canary_page: shown in place of the air-quality icon when
+        # air is OK, hidden (in favor of the bad-air warning) when it isn't —
+        # toggled by update_canary_display.
+        - arc:
+            id: price_seg0
+            start_angle: 270
+            end_angle: 285
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg1
+            start_angle: 300
+            end_angle: 315
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg2
+            start_angle: 330
+            end_angle: 345
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg3
+            start_angle: 0
+            end_angle: 15
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg4
+            start_angle: 30
+            end_angle: 45
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg5
+            start_angle: 60
+            end_angle: 75
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg6
+            start_angle: 90
+            end_angle: 105
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg7
+            start_angle: 120
+            end_angle: 135
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg8
+            start_angle: 150
+            end_angle: 165
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg9
+            start_angle: 180
+            end_angle: 195
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg10
+            start_angle: 210
+            end_angle: 225
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg11
+            start_angle: 240
+            end_angle: 255
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg12
+            start_angle: 285
+            end_angle: 300
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg13
+            start_angle: 315
+            end_angle: 330
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg14
+            start_angle: 345
+            end_angle: 0
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg15
+            start_angle: 15
+            end_angle: 30
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg16
+            start_angle: 45
+            end_angle: 60
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg17
+            start_angle: 75
+            end_angle: 90
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg18
+            start_angle: 105
+            end_angle: 120
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg19
+            start_angle: 135
+            end_angle: 150
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg20
+            start_angle: 165
+            end_angle: 180
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg21
+            start_angle: 195
+            end_angle: 210
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg22
+            start_angle: 225
+            end_angle: 240
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        - arc:
+            id: price_seg23
+            start_angle: 255
+            end_angle: 270
+            min_value: 0
+            max_value: 100
+            value: 100
+            adjustable: false
+            main:
+              width: 230
+              height: 230
+              align: CENTER
+              arc_width: 32
+              arc_opa: TRANSP
+            indicator:
+              arc_width: 32
+              arc_color: 0x444444
+        # Analog clock hands drawn on top of the price ring. Pivot is
+        # (120,120), the true display center, matching the ring's own
+        # center. Positions/updated every second by
+        # update_clock_hands.
+        - line:
+            id: clock_hour_hand
+            points: [{x: 120, y: 120}, {x: 120, y: 80}]
+            line_width: 4
+            line_color: 0xFF0000
+            line_rounded: true
+        - line:
+            id: clock_minute_hand
+            points: [{x: 120, y: 120}, {x: 120, y: 80}]
+            line_width: 3
+            line_color: 0xFF0000
+            line_rounded: true
         - label:
             id: canary_icon_lbl
             align: CENTER
