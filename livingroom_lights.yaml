@@ -1,0 +1,67 @@
+substitutions:
+  device_name: "Livingroom Lights"
+  friendly_name: "Livingroom Lights"
+  # Board: 38-pin ESP32 DevKit (ESP-WROOM-32, USB-C) -> esp32dev
+  # Chainlight toggle line needs an external pull-up to 3V3 so it stays high while the ESP boots/resets.
+  big_desklight_pin: GPIO16
+  chainlight_toggle_pin: GPIO17
+
+esphome:
+  name: livingroom-lights
+  friendly_name: "${friendly_name}"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+
+output:
+  # Big desk light: driven high to turn on, PWM dimmed
+  - platform: ledc
+    pin: ${big_desklight_pin}
+    id: big_desklight_pwm
+    frequency: 1000 Hz
+
+  # Chain light: a single low pulse toggles the downstream circuit.
+  # Idles high, never held low.
+  - platform: gpio
+    pin: ${chainlight_toggle_pin}
+    id: chainlight_toggle_out
+    inverted: true
+
+light:
+  - platform: monochromatic
+    id: big_desklight
+    name: "Big Desklight"
+    output: big_desklight_pwm
+    restore_mode: RESTORE_DEFAULT_OFF
+
+button:
+  # Only a toggle is exposed (no on/off) since state is unknown to the ESP.
+  - platform: template
+    id: chainlight_toggle
+    name: "Chainlight Toggle"
+    on_press:
+      - output.turn_on: chainlight_toggle_out   # inverted -> pin goes LOW
+      - delay: 100ms
+      - output.turn_off: chainlight_toggle_out  # pin returns HIGH
