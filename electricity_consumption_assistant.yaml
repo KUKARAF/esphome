@@ -39,14 +39,6 @@ sensor:
     id: current_buy_price
     entity_id: sensor.pstryk_current_buy_price
 
-  - platform: homeassistant
-    id: price_min_24h
-    entity_id: sensor.pstryk_next_cheapest_price_24h
-
-  - platform: homeassistant
-    id: price_max_24h
-    entity_id: sensor.pstryk_next_most_expensive_price_24h
-
 globals:
   - id: blink_state
     type: bool
@@ -80,7 +72,7 @@ light:
     default_transition_length: 0s
     restore_mode: ALWAYS_OFF
 
-  # GPIO4: price indicator — green blink at today's 24h-low, gradient between, red blink at 24h-high
+  # GPIO4: price indicator — green blink <0, gradient 0–1.80, red blink ≥1.80
   - platform: esp32_rmt_led_strip
     chipset: SK6812
     pin: GPIO4
@@ -141,18 +133,8 @@ interval:
            }
 
            float price = id(current_buy_price).state;
-           float price_min = id(price_min_24h).state;
-           float price_max = id(price_max_24h).state;
-           if (!isnan(price) && !isnan(price_min) && !isnan(price_max)) {
-             const float epsilon = 0.0001f;
-             if ((price_max - price_min) < 0.001f) {
-               auto call = id(price_led).turn_on();
-               call.set_rgb(0.0f, 1.0f, 0.0f);
-               call.set_white(0.0f);
-               call.set_brightness(brightness);
-               call.set_transition_length(0);
-               call.perform();
-             } else if (price <= price_min + epsilon) {
+           if (!isnan(price)) {
+             if (price < 0.0f) {
                if (id(blink_state)) {
                  auto call = id(price_led).turn_on();
                  call.set_rgb(0.0f, 1.0f, 0.0f);
@@ -165,7 +147,7 @@ interval:
                  call.set_transition_length(0);
                  call.perform();
                }
-             } else if (price >= price_max - epsilon) {
+             } else if (price >= 1.80f) {
                if (id(blink_state)) {
                  auto call = id(price_led).turn_on();
                  call.set_rgb(1.0f, 0.0f, 0.0f);
@@ -179,9 +161,7 @@ interval:
                  call.perform();
                }
              } else {
-               float ratio = (price - price_min) / (price_max - price_min);
-               if (ratio < 0.0f) ratio = 0.0f;
-               if (ratio > 1.0f) ratio = 1.0f;
+               float ratio = price / 1.80f;
                auto call = id(price_led).turn_on();
                call.set_rgb(ratio, 1.0f - ratio, 0.0f);
                call.set_white(0.0f);
