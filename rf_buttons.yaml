@@ -1,0 +1,194 @@
+substitutions:
+  device_name: "rf-buttons"
+  friendly_name: "RF Buttons"
+  # ──── CC1101 <-> Super Mini ESP32-S3 wiring ─────────────────────────────────
+  # 2x4 CC1101 module header, pin 1 = square pad, numbered across rows (1 2 / 3 4 / 5 6 / 7 8).
+  # Pinout confirmed by Zaitronics' CC1101 guide and the ESPHome community thread
+  # "Using the new CC1101 component"; ESPHome docs also say GDO0 = module pin 3.
+  # NOTE: other CC1101 boards (e.g. Elechouse, single-row) use a DIFFERENT order.
+  #   1 GND   2 VCC(3V3 only!)   3 GDO0   4 CSN   5 SCK   6 MOSI   7 MISO   8 GDO2
+  sck_pin: GPIO12
+  mosi_pin: GPIO11
+  miso_pin: GPIO13
+  cs_pin: GPIO10
+  gdo0_pin: GPIO9   # TX data in (remote_transmitter)
+  gdo2_pin: GPIO8   # RX data out (remote_receiver), CC1101 header pin 8
+
+esphome:
+  name: ${device_name}
+  friendly_name: "${friendly_name}"
+  includes:
+    - ev_find.h
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+logger:
+  level: DEBUG
+  # Super Mini has native USB only (TX/RX header pins are not the USB port).
+  hardware_uart: USB_SERIAL_JTAG
+
+spi:
+  clk_pin: ${sck_pin}
+  mosi_pin: ${mosi_pin}
+  miso_pin: ${miso_pin}
+
+# 433.92 MHz OOK receiver. The EV1527 button chip is a plain OOK transmitter.
+cc1101:
+  cs_pin: ${cs_pin}
+  frequency: 433.92MHz
+  modulation_type: ASK/OOK
+  symbol_rate: 5000
+  filter_bandwidth: 203kHz
+
+remote_receiver:
+  pin: ${gdo2_pin}       # GDO2 = demodulated RX data (dual-pin wiring, per ESPHome docs)
+  dump: rc_switch        # logs every decoded press while we learn the codes
+  tolerance: 50%
+  filter: 250us
+  idle: 4ms
+  buffer_size: 2kb
+  # EV1527 = 24 bits: 20-bit button ID (unique per button) + 4-bit key data.
+  # Fire one HA event per press; the button -> action mapping lives in HA.
+  #
+  # One physical press is sent as a burst of ~8-10 identical repeats, and the tail
+  # of a burst often decodes as a truncated fragment. So we only accept a code once
+  # it was seen twice in a row within 150 ms (fragments never repeat identically),
+  # then ignore further repeats of it until the burst has been quiet for 400 ms.
+  on_rc_switch:
+    - if:
+        condition:
+          lambda: |-
+            static uint32_t cand = 0, cand_ms = 0, fired = 0, fired_ms = 0;
+            const uint32_t now = millis();
+            const uint32_t c = (uint32_t) x.code;
+            if (c == fired && now - fired_ms < 400) {
+              fired_ms = now;          // still the same burst, keep suppressing
+              return false;
+            }
+            if (c == cand && now - cand_ms < 150) {
+              fired = c;
+              fired_ms = now;
+              cand = 0;
+              return true;             // confirmed new press
+            }
+            cand = c;
+            cand_ms = now;
+            return false;
+        then:
+          - lambda: |-
+              id(last_code).publish_state(str_sprintf("%06X", (unsigned) x.code));
+          - homeassistant.event:
+              event: esphome.rf_button
+              data:
+                device_id: ${device_name}
+                id: !lambda 'return str_sprintf("%05X", (unsigned) (x.code >> 4));'
+                key: !lambda 'return str_sprintf("%X", (unsigned) (x.code & 0xF));'
+                protocol: !lambda 'return to_string(x.protocol);'
+
+# ── Transmit side: lets HA "press" the item-finder remote's buttons ───────────
+# Dual-pin wiring (ESPHome cc1101 docs, "recommended"): TX data goes in on GDO0,
+# RX data comes out on GDO2. (Single shared-pin mode had a begin_tx bug fixed in
+# ESPHome 2026.10.0; we are on 2026.5.3, so we avoid it.)
+remote_transmitter:
+  pin: ${gdo0_pin}
+  carrier_duty_percent: 100%
+  on_transmit:
+    then:
+      - cc1101.begin_tx
+  on_complete:
+    then:
+      - cc1101.begin_rx
+
+button:
+  # Replays the 4-button item-finder remote (id 3C690) so the matching fob beeps.
+  # ESPHome's rc_switch protocol 1 did NOT work (fobs stayed silent): the real remote's
+  # waveform differs (T~395us, 3 extra short pairs, ~4 ms sync gap instead of 10.85 ms),
+  # measured with an SX1262 envelope recorder. So we send raw timings, see ev_find.h.
+  # The real remote keeps sending for ~3 s per press (measured: continuous captures);
+  # the fobs are battery powered and only wake up periodically, so a short burst is
+  # missed. We send 80 frames (~3.6 s).
+  # Key -> item: key 4 = headphones is CONFIRMED (the real remote's headphones key sends
+  # 3C6904). Keys 2 and 3 are still assumed from press order.
+  - platform: template
+    name: "Find Remote Control"      # key 2 (assumed)
+    icon: mdi:remote-tv
+    on_press:
+      - remote_transmitter.transmit_raw:
+          code: !lambda 'return finder_frame(0x3C6902, 80);'
+  - platform: template
+    name: "Find Cellar Keys"         # key 3 (assumed)
+    icon: mdi:key-variant
+    on_press:
+      - remote_transmitter.transmit_raw:
+          code: !lambda 'return finder_frame(0x3C6903, 80);'
+  - platform: template
+    name: "Find Headphones"          # key 4 (confirmed)
+    icon: mdi:headphones
+    on_press:
+      - remote_transmitter.transmit_raw:
+          code: !lambda 'return finder_frame(0x3C6904, 80);'
+  # key 1 ("lost somewhere" fob) = 0x3C6901 -> add the same way if wanted.
+
+text_sensor:
+  - platform: template
+    name: "Last RF Code"
+    id: last_code
+    icon: mdi:remote
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUTTON REGISTRY  (learned 2026-11-09 from the logs)
+# ─────────────────────────────────────────────────────────────────────────────
+# Firmware is deliberately dumb: it only fires the HA event `esphome.rf_button`
+# with {id, key, protocol, device_id}. WHAT each button does is configured in a
+# Home Assistant automation that matches on `id` (+ `key`). To add a button:
+#   1. press it, read the `Last RF Code` sensor / device log (24-bit hex code)
+#   2. split it: id = first 5 hex digits, key = last hex digit
+#   3. add a branch for that id/key to the HA automation, and tick it off below.
+# No reflash is needed to change or add a mapping.
+#
+# EV1527 fixed codes, all protocol 1, 433.92 MHz OOK (no rolling code).
+#
+# SOS buttons (SOS-001/V1.0, one button each, key is always 8)
+#   id 6B507  key 8   TODO: which physical button / action?
+#   id 79096  key 8   DONE: toggles light.desk_light_desk_light
+#   id 8E45B  key 8   TODO
+#   id 8F50D  key 8   TODO
+#   id A03A6  key 8   DONE: toggles light.livingroom_lights_big_desklight
+#   id D80E4  key 8   TODO
+#
+# Item-finder remote (ONE 4-button remote, id 3C690; keys 1-4 ring the 4 fobs).
+# Item names assumed from press order, not yet confirmed:
+#   id 3C690  key 1   "lost somewhere" fob      (no HA button yet; code 0x3C6901)
+#   id 3C690  key 2   TV remote fob             HA button "Find Remote Control" (key->item unverified)
+#   id 3C690  key 3   cellar keys fob           HA button "Find Cellar Keys"    (key->item unverified)
+#   id 3C690  key 4   headphones fob            HA button "Find Headphones"     WORKS, confirmed
+# HOW TRANSMITTING THE FOB CODES WAS MADE TO WORK (2026-11-09, took a while):
+#   - ESPHome's rc_switch protocol 1 does NOT work: wrong waveform. Real remote =
+#     T~395us, 24 bits, 3 extra (T,T) pairs, ~4 ms sync gap (see ev_find.h).
+#   - The fobs only react to ~3 s of continuous frames (they wake up periodically).
+#     80 frames. 12 or even 30 frames were not enough.
+#   - Use dual-pin wiring: RX on GDO2 (GPIO8), TX on GDO0 (GPIO9).
+#
+# Mappings live in HA automation.rf_buttons; versioned copy: ha/rf_buttons_automation.yaml
+# Mapped so far: 79096/8 -> toggle light.desk_light_desk_light
+#                A03A6/8 -> toggle light.livingroom_lights_big_desklight

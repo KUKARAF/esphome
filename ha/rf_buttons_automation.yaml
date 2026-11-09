@@ -1,0 +1,55 @@
+# Home Assistant automation for the rf-buttons ESPHome device (rf_buttons.yaml).
+# Live in HA as automation.rf_buttons (config id: rf_buttons) on casa.osmosis.page.
+# This file is the versioned copy: edit here, then push it (see bottom) or paste it
+# into the HA automation editor (YAML mode).
+#
+# The ESPHome device fires event `esphome.rf_button` with data:
+#   id (5 hex digits, unique per button), key (1 hex digit), protocol, device_id
+# Add one `choose` branch per button below. See the registry in rf_buttons.yaml for
+# all known ids.
+
+alias: RF Buttons
+description: >-
+  Maps 433 MHz EV1527 buttons (ESPHome device rf-buttons, event esphome.rf_button)
+  to actions. One choose-branch per button id+key.
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: event
+    event_type: esphome.rf_button
+conditions: []
+actions:
+  - choose:
+      - alias: "79096/8 -> toggle desk light"
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.event.data.id == "79096" and trigger.event.data.key == "8" }}
+        sequence:
+          - action: light.toggle
+            target:
+              entity_id: light.desk_light_desk_light
+
+      - alias: "A03A6/8 -> toggle living room desklight"
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.event.data.id == "A03A6" and trigger.event.data.key == "8" }}
+        sequence:
+          - action: light.toggle
+            target:
+              entity_id: light.livingroom_lights_big_desklight
+
+      # TODO: copy a branch above for each remaining button, e.g.
+      # - alias: "3C690/1 -> ..."
+      #   conditions:
+      #     - condition: template
+      #       value_template: >-
+      #         {{ trigger.event.data.id == "3C690" and trigger.event.data.key == "1" }}
+      #   sequence:
+      #     - action: ...
+
+# Push to HA (token = a long-lived access token; never commit it):
+#   yq -o=json . ha/rf_buttons_automation.yaml | curl -s -X POST \
+#     -H "Authorization: Bearer $HA_TOKEN" -H "Content-Type: application/json" \
+#     -d @- https://casa.osmosis.page/api/config/automation/config/rf_buttons
